@@ -263,6 +263,50 @@ func TestHandlerRejectsMediaOutsideAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestHandlerReportsUnusableMediaRoots(t *testing.T) {
+	ctx := context.Background()
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+	usable := filepath.Join(filepath.Dir(archive.Path()), "media")
+	if err := os.MkdirAll(usable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The realistic case: the archive was indexed against a volume that is not
+	// mounted now, which otherwise looks healthy until every attachment 404s.
+	unmounted := filepath.Join(t.TempDir(), "Volumes", "Backups", "WhatsApp")
+
+	handler := NewHandler(archive, testToken, testHost, unmounted)
+	t.Cleanup(handler.close)
+	warning := handler.mediaRootWarning()
+	if !strings.Contains(warning, unmounted) || !strings.Contains(warning, "missing or unreadable") {
+		t.Fatalf("warning = %q, must name the unusable root and why", warning)
+	}
+	if strings.Contains(warning, "no media directory is readable") {
+		t.Fatalf("warning overstates the problem while a root still works: %q", warning)
+	}
+	if len(handler.allowedMediaRoots) != 1 {
+		t.Fatalf("usable roots = %d want 1", len(handler.allowedMediaRoots))
+	}
+
+	// A source root that is not a path at all: older archives store a
+	// "wa-store:" identity in the same field.
+	identity := NewHandler(archive, testToken, testHost, "wa-store:abc123")
+	t.Cleanup(identity.close)
+	if got := identity.mediaRootWarning(); !strings.Contains(got, "not an absolute path") {
+		t.Fatalf("identity warning = %q", got)
+	}
+
+	// Everything resolving must stay silent, or the warning becomes noise.
+	quiet := NewHandler(archive, testToken, testHost)
+	t.Cleanup(quiet.close)
+	if got := quiet.mediaRootWarning(); got != "" {
+		t.Fatalf("warning on a healthy archive = %q", got)
+	}
+}
+
 func TestInlineMediaKind(t *testing.T) {
 	for _, tc := range []struct {
 		mediaType   string

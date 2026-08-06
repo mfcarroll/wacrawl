@@ -9,6 +9,10 @@
   sniffer recognises neither QuickTime, 3GP, CAF, nor AMR, and loaded only when
   playback starts. Each playable attachment gets its own HMAC-signed URL, since
   a `<video>` element cannot send the viewer's `Authorization` header.
+- Report unusable media directories when the web viewer starts, naming each one
+  and why it failed. An archive indexed against a volume that is no longer
+  mounted previously looked healthy — chats and search worked — while every
+  attachment returned 404 with nothing said about the cause.
 - Add `web --allow-cloud-media` to fetch media a cloud provider is holding
   remotely (Google Drive, iCloud) instead of reporting it missing. Off by
   default, because WhatsApp Desktop leaves stubs for media it never downloaded

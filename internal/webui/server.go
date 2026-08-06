@@ -59,6 +59,7 @@ type handler struct {
 	token             string
 	allowedHost       string
 	allowedMediaRoots []allowedMediaRoot
+	skippedMediaRoots []skippedMediaRoot
 	allowCloudMedia   bool
 }
 
@@ -66,6 +67,13 @@ type allowedMediaRoot struct {
 	path        string
 	lexicalPath string
 	root        *os.Root
+}
+
+// skippedMediaRoot records a configured media directory the viewer could not
+// use, so startup can say so instead of leaving every attachment to 404.
+type skippedMediaRoot struct {
+	path   string
+	reason string
 }
 
 type statusResponse struct {
@@ -141,11 +149,14 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	if output == nil {
 		output = io.Discard
 	}
-	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
-
 	handler := NewHandler(archive, token, host, status.SourceRoot)
 	handler.allowCloudMedia = cfg.AllowCloudMedia
 	defer handler.close()
+	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
+	if warning := handler.mediaRootWarning(); warning != "" {
+		_, _ = fmt.Fprintf(output, "\n%s", warning)
+	}
+
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -175,28 +186,61 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 
 func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...string) *handler {
 	mediaRoots := []string{filepath.Join(filepath.Dir(archive.Path()), "media")}
-	for _, root := range sourceRoots {
-		if strings.TrimSpace(root) != "" && filepath.IsAbs(root) {
-			mediaRoots = append(mediaRoots, root)
-		}
-	}
 	h := &handler{store: archive, token: token, allowedHost: allowedHost}
+	for _, root := range sourceRoots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		// Source roots are stored canonical, so anything relative is not a path
+		// at all: older archives can hold a "wa-store:" identity here instead.
+		if !filepath.IsAbs(trimmed) {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{trimmed, "not an absolute path"})
+			continue
+		}
+		mediaRoots = append(mediaRoots, trimmed)
+	}
 	for _, root := range mediaRoots {
 		absolute, err := filepath.Abs(root)
 		if err != nil {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{root, "cannot be resolved"})
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(absolute)
 		if err != nil {
+			// Much the most common cause: the archive was indexed against a
+			// volume that is not mounted now.
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "missing or unreadable"})
 			continue
 		}
 		opened, err := os.OpenRoot(resolved)
 		if err != nil {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "cannot be opened"})
 			continue
 		}
 		h.allowedMediaRoots = append(h.allowedMediaRoots, allowedMediaRoot{path: resolved, lexicalPath: filepath.Clean(absolute), root: opened})
 	}
 	return h
+}
+
+// mediaRootWarning describes unusable media roots for the operator, or returns
+// empty when everything resolved. Without it an archive indexed against an
+// unmounted volume looks perfectly healthy — chats and search work, and every
+// single attachment 404s with nothing said anywhere about why.
+func (h *handler) mediaRootWarning() string {
+	if len(h.skippedMediaRoots) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if len(h.allowedMediaRoots) == 0 {
+		b.WriteString("Warning: no media directory is readable, so attachments will not load.\n")
+	} else {
+		b.WriteString("Warning: some media directories are unreadable; attachments stored there will not load.\n")
+	}
+	for _, skipped := range h.skippedMediaRoots {
+		_, _ = fmt.Fprintf(&b, "  %s (%s)\n", skipped.path, skipped.reason)
+	}
+	return b.String()
 }
 
 func (h *handler) close() {
