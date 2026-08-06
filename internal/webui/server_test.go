@@ -289,6 +289,19 @@ func TestInlineMediaKind(t *testing.T) {
 	}
 }
 
+// Leading bytes captured from files a real encoder produced, so the interplay
+// between Go's sniffer and the extension table is exercised against container
+// headers rather than against a guess at what they look like.
+var realHeaders = map[string][]byte{
+	"3gp":  []byte("\x00\x00\x00\x1cftyp3gp4\x00\x00\x02\x003gp4isomiso2\x00\x00\x00\x08free\x00\x00\x94\x28mdat"),
+	"mov":  []byte("\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00qt  \x00\x00\x00\x08wide\x00\x00\x1b\x1bmdat"),
+	"webm": []byte("\x1aE\xdf\xa3\x9fB\x86\x81\x01B\xf7\x81\x01B\xf2\x81\x04B\xf3\x81\x08B\x82\x84webmB\x87\x81\x02B\x85\x81\x02"),
+	"caf":  []byte("caff\x00\x01\x00\x00desc\x00\x00\x00\x00\x00\x00\x00\x20\x40\xe5\x88\x80\x00\x00\x00\x00lpcm"),
+	"m4a":  []byte("\x00\x00\x00\x1cftypM4A \x00\x00\x02\x00M4A isomiso2\x00\x00\x00\x08free\x00\x00\x44\xd8mdat"),
+	"mp3":  []byte("ID3\x04\x00\x00\x00\x00\x00\x23TSSE\x00\x00\x00\x0f\x00\x00\x03Lavf62.12.102"),
+	"opus": []byte("OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\xaa\x7e\x62\x1c\x00\x00\x00\x00\xbbo\x22z\x01\x13OpusHead"),
+}
+
 func TestInlineContentType(t *testing.T) {
 	html := []byte("<!DOCTYPE html><html><body>hi</body></html>")
 	for _, tc := range []struct {
@@ -297,11 +310,19 @@ func TestInlineContentType(t *testing.T) {
 		want  string
 	}{
 		{"clip.mp4", mp4Header, "video/mp4"},
-		// The sniffer cannot name these; the extension is the only signal left.
-		{"clip.mov", []byte{0x00, 0x01, 0x02, 0x03}, "video/quicktime"},
-		{"note.opus", []byte("OggS\x00rest of the stream"), "audio/ogg"},
+		// QuickTime and 3GP are ISO-BMFF like mp4, but neither declares an mp4
+		// brand, so the sniffer gives up and the extension decides.
+		{"clip.mov", realHeaders["mov"], "video/quicktime"},
+		{"clip.3gp", realHeaders["3gp"], "video/3gpp"},
+		// CAF has no signature Go knows at all.
+		{"voice.caf", realHeaders["caf"], "audio/x-caf"},
+		// Ogg is recognised, but only as a container; it names no audio type.
+		{"voice.opus", realHeaders["opus"], "audio/ogg"},
 		// Shared container: the sniffer says video/mp4, but this plays as audio.
-		{"voice.m4a", mp4Header, "audio/mp4"},
+		{"voice.m4a", realHeaders["m4a"], "audio/mp4"},
+		// Sniffed and claimed agree here; either answer would do.
+		{"voice.mp3", realHeaders["mp3"], "audio/mpeg"},
+		{"clip.webm", realHeaders["webm"], "video/webm"},
 		// No extension to go on, so the sniffed type stands.
 		{"photo", []byte("GIF89a...."), "image/gif"},
 		// Bytes veto a lying extension.
