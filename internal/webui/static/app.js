@@ -772,7 +772,35 @@
   }
 
   function canInlineImage(message) {
-    return message.source_pk > 0 && ["image", "gif", "sticker"].includes(mediaKind(message));
+    return message.source_pk > 0 && message.media_kind === "image";
+  }
+
+  // ---------- Inline players ----------
+  // Video and voice notes stream straight from the signed URL the server put on
+  // the message: a <video> element loads its own source and cannot send the
+  // bearer header, and buffering into a blob the way images do would download
+  // whole files and defeat ranged seeking.
+
+  function canPlayInline(message) {
+    return Boolean(message.media_url) && ["video", "audio"].includes(message.media_kind);
+  }
+
+  function inlinePlayerNode(message) {
+    const kind = message.media_kind;
+    const player = document.createElement(kind === "audio" ? "audio" : "video");
+    player.className = `media-player kind-${kind}`;
+    player.controls = true;
+    // Nothing is fetched until the user presses play. One archive chat holds 150
+    // videos, and preloading those from a cloud-synced folder would pull down
+    // gigabytes on a scroll.
+    player.preload = "none";
+    player.playsInline = true;
+    player.src = message.media_url;
+    player.setAttribute("aria-label", mediaTitleOf(message) || MEDIA_PLACEHOLDER[kind] || "Attachment");
+    // Fires when playback is attempted and the bytes are missing, unreadable, or
+    // in a codec this browser has no decoder for.
+    player.addEventListener("error", () => player.replaceWith(mediaCard(message)), { once: true });
+    return player;
   }
 
   // WhatsApp stores the media content hash (44-char base64 of a 32-byte
@@ -892,7 +920,9 @@
     }
 
     if (message.media_type || message.media_title || (message.message_type && message.message_type !== "text" && message.message_type !== "link")) {
-      bubble.append(canInlineImage(message) ? inlineImageNode(message) : mediaCard(message));
+      if (canInlineImage(message)) bubble.append(inlineImageNode(message));
+      else if (canPlayInline(message)) bubble.append(inlinePlayerNode(message));
+      else bubble.append(mediaCard(message));
     }
 
     const body = document.createElement("span");

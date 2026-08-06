@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- Play video and voice notes in the web viewer. Media is served with ranged
+  requests so playback can seek, typed from the file extension because Go's
+  sniffer recognises neither QuickTime, 3GP, CAF, nor AMR, and loaded only when
+  playback starts. Each playable attachment gets its own HMAC-signed URL, since
+  a `<video>` element cannot send the viewer's `Authorization` header.
+- Add `web --allow-cloud-media` to fetch media a cloud provider is holding
+  remotely (Google Drive, iCloud) instead of reporting it missing. Off by
+  default, because WhatsApp Desktop leaves stubs for media it never downloaded
+  and fetching one of those would stall the request.
+
 ## [0.3.6] - 2026-08-03
 
 ### Fixed

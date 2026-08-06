@@ -263,6 +263,266 @@ func TestHandlerRejectsMediaOutsideAllowedRoots(t *testing.T) {
 	}
 }
 
+func TestInlineMediaKind(t *testing.T) {
+	for _, tc := range []struct {
+		mediaType   string
+		messageType string
+		want        string
+	}{
+		{"image", "", "image"},
+		{"image/jpeg", "photo", "image"},
+		{"image/webp", "sticker", "image"},
+		{"image/gif", "gif", "image"},
+		{"video/mp4", "video", "video"},
+		// An animated GIF is stored as an mp4 and claims both; it needs a player.
+		{"video/mp4", "gif", "video"},
+		{"audio/ogg", "ptt", "audio"},
+		{"", "voice_message", "audio"},
+		{"application/pdf", "document", ""},
+		{"", "text", ""},
+		{"", "", ""},
+	} {
+		got := inlineMediaKind(store.Message{MediaType: tc.mediaType, MessageType: tc.messageType})
+		if got != tc.want {
+			t.Errorf("inlineMediaKind(%q, %q) = %q want %q", tc.mediaType, tc.messageType, got, tc.want)
+		}
+	}
+}
+
+func TestInlineContentType(t *testing.T) {
+	html := []byte("<!DOCTYPE html><html><body>hi</body></html>")
+	for _, tc := range []struct {
+		name  string
+		sniff []byte
+		want  string
+	}{
+		{"clip.mp4", mp4Header, "video/mp4"},
+		// The sniffer cannot name these; the extension is the only signal left.
+		{"clip.mov", []byte{0x00, 0x01, 0x02, 0x03}, "video/quicktime"},
+		{"note.opus", []byte("OggS\x00rest of the stream"), "audio/ogg"},
+		// Shared container: the sniffer says video/mp4, but this plays as audio.
+		{"voice.m4a", mp4Header, "audio/mp4"},
+		// No extension to go on, so the sniffed type stands.
+		{"photo", []byte("GIF89a...."), "image/gif"},
+		// Bytes veto a lying extension.
+		{"trap.mp4", html, ""},
+		{"notes.txt", []byte("plain text, definitely not an image"), ""},
+		{"unknown.bin", []byte{0x00, 0x01, 0x02, 0x03}, ""},
+	} {
+		got, ok := inlineContentType(tc.name, tc.sniff)
+		if !ok {
+			got = ""
+		}
+		if got != tc.want {
+			t.Errorf("inlineContentType(%q) = %q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// mp4Header is a minimal ISO base media file ftyp box, enough for both Go's
+// sniffer and this package to treat the bytes as an mp4 container.
+var mp4Header = []byte("\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
+
+func TestHandlerStreamsPlayableMedia(t *testing.T) {
+	ctx := context.Background()
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "media.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+
+	dir := filepath.Join(filepath.Dir(archive.Path()), "media")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	videoBytes := append(append([]byte{}, mp4Header...), bytes.Repeat([]byte("video payload "), 64)...)
+	videoPath := filepath.Join(dir, "clip.mp4")
+	if err := os.WriteFile(videoPath, videoBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	voicePath := filepath.Join(dir, "voice.m4a")
+	if err := os.WriteFile(voicePath, videoBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docPath := filepath.Join(dir, "report.pdf")
+	if err := os.WriteFile(docPath, []byte("%PDF-1.7\nnot media"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sparse, so the oversize cases cost no real disk.
+	bigVideoPath := filepath.Join(dir, "long.mp4")
+	writeSparseFile(t, bigVideoPath, maxInlineMediaBytes+1)
+	bigImagePath := filepath.Join(dir, "huge.png")
+	writeSparseFile(t, bigImagePath, maxInlineMediaBytes+1)
+
+	const jid = "555@s.whatsapp.net"
+	now := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	err = archive.ReplaceAll(ctx, store.ImportStats{FinishedAt: now}, nil, []store.Chat{
+		{JID: jid, Kind: "dm", Name: "Media Tester", LastMessageAt: now},
+	}, nil, nil, []store.Message{
+		{SourcePK: 1, ChatJID: jid, MessageID: "v1", Timestamp: now, MediaType: "video", MediaPath: videoPath},
+		{SourcePK: 2, ChatJID: jid, MessageID: "a1", Timestamp: now, MediaType: "audio", MessageType: "ptt", MediaPath: voicePath},
+		{SourcePK: 3, ChatJID: jid, MessageID: "d1", Timestamp: now, MediaType: "document", MediaPath: docPath},
+		{SourcePK: 4, ChatJID: jid, MessageID: "v2", Timestamp: now, MediaType: "video", MediaPath: bigVideoPath},
+		{SourcePK: 5, ChatJID: jid, MessageID: "i2", Timestamp: now, MediaType: "image", MediaPath: bigImagePath},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(archive, testToken, testHost)
+	t.Cleanup(handler.close)
+
+	video := request(t, handler, "/api/media?pk=1", testToken)
+	if video.Code != http.StatusOK || video.Header().Get("Content-Type") != "video/mp4" {
+		t.Fatalf("video status=%d content-type=%q", video.Code, video.Header().Get("Content-Type"))
+	}
+	if !bytes.Equal(video.Body.Bytes(), videoBytes) {
+		t.Fatalf("video bytes = %d want %d", video.Body.Len(), len(videoBytes))
+	}
+	if got := video.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("accept-ranges = %q, seeking needs ranged requests", got)
+	}
+	if voice := request(t, handler, "/api/media?pk=2", testToken); voice.Header().Get("Content-Type") != "audio/mp4" {
+		t.Fatalf("voice note content-type = %q, must not be typed as video", voice.Header().Get("Content-Type"))
+	}
+	if document := request(t, handler, "/api/media?pk=3", testToken); document.Code != http.StatusNotFound {
+		t.Fatalf("document status = %d, documents have no inline preview", document.Code)
+	}
+	// The size cap guards browser decode of a whole image; ranged video is exempt.
+	if big := request(t, handler, "/api/media?pk=4", testToken); big.Code != http.StatusOK {
+		t.Fatalf("oversize video status = %d, streamed media is not capped", big.Code)
+	}
+	if big := request(t, handler, "/api/media?pk=5", testToken); big.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize image status = %d want 413", big.Code)
+	}
+
+	ranged := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/media?pk=1", nil)
+	ranged.Host = testHost
+	ranged.Header.Set("Authorization", "Bearer "+testToken)
+	ranged.Header.Set("Range", "bytes=10-19")
+	partial := httptest.NewRecorder()
+	handler.ServeHTTP(partial, ranged)
+	if partial.Code != http.StatusPartialContent {
+		t.Fatalf("ranged status = %d want 206", partial.Code)
+	}
+	if !bytes.Equal(partial.Body.Bytes(), videoBytes[10:20]) {
+		t.Fatalf("ranged body = %q want %q", partial.Body.Bytes(), videoBytes[10:20])
+	}
+}
+
+func TestHandlerAuthenticatesMediaBySignedURL(t *testing.T) {
+	ctx := context.Background()
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "media.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+
+	dir := filepath.Join(filepath.Dir(archive.Path()), "media")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(dir, "clip.mp4")
+	if err := os.WriteFile(videoPath, mp4Header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(dir, "photo.png")
+	writeTestPNG(t, imagePath)
+
+	const jid = "555@s.whatsapp.net"
+	now := time.Date(2026, 8, 2, 9, 0, 0, 0, time.UTC)
+	if err := archive.ReplaceAll(ctx, store.ImportStats{FinishedAt: now}, nil, []store.Chat{
+		{JID: jid, Kind: "dm", Name: "Media Tester", LastMessageAt: now},
+	}, nil, nil, []store.Message{
+		{SourcePK: 1, ChatJID: jid, MessageID: "v1", Timestamp: now, MediaType: "video", MediaPath: videoPath},
+		{SourcePK: 2, ChatJID: jid, MessageID: "i1", Timestamp: now, MediaType: "image", MediaPath: imagePath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(archive, testToken, testHost)
+	t.Cleanup(handler.close)
+
+	listed := request(t, handler, "/api/messages?chat="+url.QueryEscape(jid), testToken)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("messages status = %d", listed.Code)
+	}
+	var messages []messageResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	byPK := map[int64]messageResponse{}
+	for _, message := range messages {
+		byPK[message.SourcePK] = message
+	}
+	if got := byPK[1].MediaKind; got != "video" {
+		t.Fatalf("video media_kind = %q", got)
+	}
+	// Images are fetched with the bearer token, so they need no signed link.
+	if byPK[2].MediaKind != "image" || byPK[2].MediaURL != "" {
+		t.Fatalf("image kind=%q url=%q", byPK[2].MediaKind, byPK[2].MediaURL)
+	}
+	signed := byPK[1].MediaURL
+	if signed == "" {
+		t.Fatal("video message carries no signed media URL")
+	}
+	// The whole point: a <video> element sends no Authorization header.
+	if response := request(t, handler, signed, ""); response.Code != http.StatusOK {
+		t.Fatalf("signed media status = %d want 200", response.Code)
+	}
+	if response := request(t, handler, "/api/media?pk=1", ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned media status = %d want 401", response.Code)
+	}
+	for name, tampered := range map[string]string{
+		"wrong signature": signed[:len(signed)-1] + flipLast(signed),
+		"another message": strings.Replace(signed, "pk=1", "pk=2", 1),
+		"stretched expiry": strings.Replace(signed, "exp="+strconv.FormatInt(mediaExpiry(t, signed), 10),
+			"exp="+strconv.FormatInt(mediaExpiry(t, signed)+3600, 10), 1),
+	} {
+		if response := request(t, handler, tampered, ""); response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d want 401", name, response.Code)
+		}
+	}
+
+	// An expired link is refused even though its signature is intact.
+	expired := httptest.NewRequest(http.MethodGet, "http://"+testHost+handler.signedMediaURL(1, time.Now()), nil)
+	if handler.signedMediaRequest(expired, time.Now().Add(mediaURLTTL+time.Minute)) {
+		t.Fatal("expired signed media URL still accepted")
+	}
+}
+
+func mediaExpiry(t *testing.T, signed string) int64 {
+	t.Helper()
+	parsed, err := url.Parse(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry, err := strconv.ParseInt(parsed.Query().Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return expiry
+}
+
+func flipLast(signed string) string {
+	if strings.HasSuffix(signed, "A") {
+		return "B"
+	}
+	return "A"
+}
+
+// writeSparseFile makes a file of the given length without allocating blocks for
+// it, so size-limit cases stay cheap. The bytes read back are zeros.
+func writeSparseFile(t *testing.T, path string, size int64) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if err := file.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeTestPNG(t *testing.T, path string) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))

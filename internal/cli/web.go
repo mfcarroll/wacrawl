@@ -13,6 +13,7 @@ func (a *app) runWeb(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	port := fs.Int("port", 0, "")
+	allowCloudMedia := fs.Bool("allow-cloud-media", false, "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printCommandUsage(a.stdout, "web")
@@ -30,6 +31,10 @@ func (a *app) runWeb(ctx context.Context, args []string) error {
 		return usageErr(errors.New("web does not support --json"))
 	}
 	return a.withArchiveStore(ctx, func(st *store.Store) error {
-		return webui.Serve(ctx, st, webui.Config{Port: *port, Output: a.stdout})
+		return webui.Serve(ctx, st, webui.Config{
+			Port:            *port,
+			Output:          a.stdout,
+			AllowCloudMedia: *allowCloudMedia,
+		})
 	})
 }
