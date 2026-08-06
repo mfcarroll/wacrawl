@@ -690,6 +690,11 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+// setSecurityHeaders locks the page down to what the viewer actually uses.
+// Note that media-src allows 'self' but not blob:, because players load signed
+// URLs directly. Images do go through blob URLs, which is why img-src lists it.
+// Anything moving media onto the blob path has to widen media-src to match, or
+// playback fails as an opaque MediaError with no console message.
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
