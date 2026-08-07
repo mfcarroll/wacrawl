@@ -456,7 +456,7 @@ func TestHandlerStreamsPlayableMedia(t *testing.T) {
 	err = archive.ReplaceAll(ctx, store.ImportStats{FinishedAt: now}, nil, []store.Chat{
 		{JID: jid, Kind: "dm", Name: "Media Tester", LastMessageAt: now},
 	}, nil, nil, []store.Message{
-		{SourcePK: 1, ChatJID: jid, MessageID: "v1", Timestamp: now, MediaType: "video", MediaPath: videoPath},
+		{SourcePK: 1, ChatJID: jid, MessageID: "v1", Timestamp: now, MediaType: "video", MediaPath: videoPath, MediaURL: "https://cdn.invalid/private-video"},
 		{SourcePK: 2, ChatJID: jid, MessageID: "a1", Timestamp: now, MediaType: "audio", MessageType: "ptt", MediaPath: voicePath},
 		{SourcePK: 3, ChatJID: jid, MessageID: "d1", Timestamp: now, MediaType: "document", MediaPath: docPath},
 		{SourcePK: 4, ChatJID: jid, MessageID: "v2", Timestamp: now, MediaType: "video", MediaPath: bigVideoPath},
@@ -554,12 +554,17 @@ func TestHandlerAuthenticatesMediaBySignedURL(t *testing.T) {
 		t.Fatalf("video media_kind = %q", got)
 	}
 	// Images are fetched with the bearer token, so they need no signed link.
-	if byPK[2].MediaKind != "image" || byPK[2].MediaURL != "" {
-		t.Fatalf("image kind=%q url=%q", byPK[2].MediaKind, byPK[2].MediaURL)
+	if byPK[2].MediaKind != "image" || byPK[2].MediaSrc != "" {
+		t.Fatalf("image kind=%q url=%q", byPK[2].MediaKind, byPK[2].MediaSrc)
 	}
-	signed := byPK[1].MediaURL
+	signed := byPK[1].MediaSrc
 	if signed == "" {
 		t.Fatal("video message carries no signed media URL")
+	}
+	// The signed local link must never be confused with, or accompanied by,
+	// WhatsApp's remote CDN address for the same attachment.
+	if body := listed.Body.String(); strings.Contains(body, "cdn.invalid") || strings.Contains(body, `"media_url"`) || strings.Contains(body, "media_path") {
+		t.Fatalf("messages response leaked a private media location: %s", body)
 	}
 	// The whole point: a <video> element sends no Authorization header.
 	if response := request(t, handler, signed, ""); response.Code != http.StatusOK {

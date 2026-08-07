@@ -122,9 +122,12 @@ type messageResponse struct {
 	// inline, and empty for everything else. Classifying server-side keeps the
 	// client from offering a player for something /api/media would refuse.
 	MediaKind string `json:"media_kind,omitempty"`
-	// MediaURL is a signed link to the bytes, present only for the kinds the
-	// browser loads by URL rather than by fetch. See mediaSignature.
-	MediaURL string `json:"media_url,omitempty"`
+	// MediaSrc is a signed local link to the bytes, present only for the kinds
+	// the browser loads by URL rather than by fetch. See mediaSignature.
+	// Deliberately not named media_url: store.Message.MediaURL is WhatsApp's
+	// remote CDN address for the same attachment, which must never leave this
+	// process, and one name for both would make that leak easy to miss.
+	MediaSrc string `json:"media_src,omitempty"`
 }
 
 func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
@@ -488,9 +491,9 @@ func (h *handler) messagesForWeb(messages []store.Message) []messageResponse {
 		kind := inlineMediaKind(message)
 		// Images are fetched with the bearer token and shown from a blob, so only
 		// the streamed kinds need a URL the element can load on its own.
-		mediaURL := ""
+		mediaSrc := ""
 		if message.SourcePK > 0 && (kind == "video" || kind == "audio") {
-			mediaURL = h.signedMediaURL(message.SourcePK, now)
+			mediaSrc = h.signedMediaURL(message.SourcePK, now)
 		}
 		out = append(out, messageResponse{
 			SourcePK:    message.SourcePK,
@@ -509,7 +512,7 @@ func (h *handler) messagesForWeb(messages []store.Message) []messageResponse {
 			Starred:     message.Starred,
 			Snippet:     message.Snippet,
 			MediaKind:   kind,
-			MediaURL:    mediaURL,
+			MediaSrc:    mediaSrc,
 		})
 	}
 	return out

@@ -751,6 +751,10 @@
       img.alt = mediaTitleOf(message) || MEDIA_PLACEHOLDER[mediaKind(message)] || "Attachment";
       img.decoding = "async";
       img.addEventListener("load", () => figure.classList.remove("loading"), { once: true });
+      // A 200 only means bytes arrived, not that this browser can decode them:
+      // HEIC outside Safari, or a truncated file, both land here. Without this
+      // the placeholder shimmers forever, showing neither a photo nor a card.
+      img.addEventListener("error", () => figure.replaceWith(mediaCard(message)), { once: true });
       img.src = url;
       figure.append(img);
       figure.addEventListener("click", () => showLightbox(url, img.alt));
@@ -782,7 +786,7 @@
   // whole files and defeat ranged seeking.
 
   function canPlayInline(message) {
-    return Boolean(message.media_url) && ["video", "audio"].includes(message.media_kind);
+    return Boolean(message.media_src) && ["video", "audio"].includes(message.media_kind);
   }
 
   function inlinePlayerNode(message) {
@@ -795,7 +799,7 @@
     // gigabytes on a scroll.
     player.preload = "none";
     player.playsInline = true;
-    player.src = message.media_url;
+    player.src = message.media_src;
     player.setAttribute("aria-label", mediaTitleOf(message) || MEDIA_PLACEHOLDER[kind] || "Attachment");
     // Fires when playback is attempted and the bytes are missing, unreadable, or
     // in a codec this browser has no decoder for.
