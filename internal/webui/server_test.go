@@ -278,6 +278,20 @@ func TestHandlerReportsUnusableMediaRoots(t *testing.T) {
 	// mounted now, which otherwise looks healthy until every attachment 404s.
 	unmounted := filepath.Join(t.TempDir(), "Volumes", "Backups", "WhatsApp")
 
+	// An archive whose media directory was never created — the normal state
+	// without --copy-media — must not be reported while a source root works.
+	noCopyMedia := filepath.Join(t.TempDir(), "elsewhere.db")
+	sideArchive, err := store.Open(ctx, noCopyMedia)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sideArchive.Close() })
+	quietWithSource := NewHandler(sideArchive, testToken, testHost, usable)
+	t.Cleanup(quietWithSource.close)
+	if got := quietWithSource.mediaRootWarning(); got != "" {
+		t.Fatalf("warned about an absent archive media dir while a source root works: %q", got)
+	}
+
 	handler := NewHandler(archive, testToken, testHost, unmounted)
 	t.Cleanup(handler.close)
 	warning := handler.mediaRootWarning()
@@ -307,28 +321,46 @@ func TestHandlerReportsUnusableMediaRoots(t *testing.T) {
 	}
 }
 
+// TestInlineMediaKind covers every media_type/message_type/extension combination
+// observed in a real WhatsApp Desktop store of ~127k messages, plus the cases
+// that only the type strings can answer.
 func TestInlineMediaKind(t *testing.T) {
 	for _, tc := range []struct {
 		mediaType   string
 		messageType string
+		path        string
 		want        string
 	}{
-		{"image", "", "image"},
-		{"image/jpeg", "photo", "image"},
-		{"image/webp", "sticker", "image"},
-		{"image/gif", "gif", "image"},
-		{"video/mp4", "video", "video"},
-		// An animated GIF is stored as an mp4 and claims both; it needs a player.
-		{"video/mp4", "gif", "video"},
-		{"audio/ogg", "ptt", "audio"},
-		{"", "voice_message", "audio"},
-		{"application/pdf", "document", ""},
-		{"", "text", ""},
-		{"", "", ""},
+		// Observed in a real store, with the count each accounted for.
+		{"image", "image", "/m/IMG.jpg", "image"},      // 2286
+		{"video", "video", "/m/VID.mp4", "video"},      // 39
+		{"document", "document", "/m/doc.pdf", ""},     // 28
+		{"audio", "audio", "/m/PTT.opus", "audio"},     // 25
+		{"gif", "gif", "/m/GIF.mp4", "video"},          // 15 — typed gif, stored mp4
+		{"sticker", "sticker", "/m/STK.webp", "image"}, // 8
+		{"", "type_54", "/m/VID.mp4", "video"},         // 1 — no usable type at all
+		{"audio", "audio", "/m/AUD.m4a", "audio"},      // 1
+		{"document", "document", "/m/book.epub", ""},   // 1
+		{"document", "document", "/m/notes.txt", ""},   // 1
+
+		// An unfamiliar extension falls back to the type strings.
+		{"image", "photo", "/m/IMG.thumb", "image"},
+		{"video", "video", "/m/clip.bin", "video"},
+		{"audio", "ptt", "/m/note", "audio"},
+		{"", "voice_message", "/m/note", "audio"},
+		{"sticker", "sticker", "/m/s", "image"},
+		{"", "", "/m/whatever", ""},
+
+		// Extension wins over a type string that disagrees with it.
+		{"image", "image", "/m/mislabelled.mp4", "video"},
+
+		// No path means nothing can ever be served, whatever the type says.
+		{"image", "image", "", ""},
+		{"video", "video", "  ", ""},
 	} {
-		got := inlineMediaKind(store.Message{MediaType: tc.mediaType, MessageType: tc.messageType})
+		got := inlineMediaKind(store.Message{MediaType: tc.mediaType, MessageType: tc.messageType, MediaPath: tc.path})
 		if got != tc.want {
-			t.Errorf("inlineMediaKind(%q, %q) = %q want %q", tc.mediaType, tc.messageType, got, tc.want)
+			t.Errorf("inlineMediaKind(%q, %q, %q) = %q want %q", tc.mediaType, tc.messageType, tc.path, got, tc.want)
 		}
 	}
 }

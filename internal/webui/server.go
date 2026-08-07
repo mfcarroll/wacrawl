@@ -74,6 +74,9 @@ type allowedMediaRoot struct {
 type skippedMediaRoot struct {
 	path   string
 	reason string
+	// optional marks a root whose absence is normal, so it is only worth
+	// mentioning when it leaves the viewer with nothing readable at all.
+	optional bool
 }
 
 type statusResponse struct {
@@ -149,10 +152,14 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	if output == nil {
 		output = io.Discard
 	}
+	// Print the URL before touching any media root. Resolving one can be slow or
+	// can block outright — a network volume, or a directory macOS gates behind a
+	// privacy prompt — and the address has to reach the operator regardless.
+	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
+
 	handler := NewHandler(archive, token, host, status.SourceRoot)
 	handler.allowCloudMedia = cfg.AllowCloudMedia
 	defer handler.close()
-	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
 	if warning := handler.mediaRootWarning(); warning != "" {
 		_, _ = fmt.Fprintf(output, "\n%s", warning)
 	}
@@ -185,8 +192,10 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 }
 
 func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...string) *handler {
-	mediaRoots := []string{filepath.Join(filepath.Dir(archive.Path()), "media")}
 	h := &handler{store: archive, token: token, allowedHost: allowedHost}
+	// The archive's own media directory only exists once an import ran with
+	// --copy-media, so its absence is ordinary rather than a fault.
+	candidates := []mediaRootCandidate{{filepath.Join(filepath.Dir(archive.Path()), "media"), true}}
 	for _, root := range sourceRoots {
 		trimmed := strings.TrimSpace(root)
 		if trimmed == "" {
@@ -195,27 +204,27 @@ func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...
 		// Source roots are stored canonical, so anything relative is not a path
 		// at all: older archives can hold a "wa-store:" identity here instead.
 		if !filepath.IsAbs(trimmed) {
-			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{trimmed, "not an absolute path"})
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{trimmed, "not an absolute path", false})
 			continue
 		}
-		mediaRoots = append(mediaRoots, trimmed)
+		candidates = append(candidates, mediaRootCandidate{trimmed, false})
 	}
-	for _, root := range mediaRoots {
-		absolute, err := filepath.Abs(root)
+	for _, candidate := range candidates {
+		absolute, err := filepath.Abs(candidate.path)
 		if err != nil {
-			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{root, "cannot be resolved"})
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{candidate.path, "cannot be resolved", candidate.optional})
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(absolute)
 		if err != nil {
-			// Much the most common cause: the archive was indexed against a
-			// volume that is not mounted now.
-			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "missing or unreadable"})
+			// For a configured source root, much the most common cause is that
+			// the archive was indexed against a volume that is not mounted now.
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "missing or unreadable", candidate.optional})
 			continue
 		}
 		opened, err := os.OpenRoot(resolved)
 		if err != nil {
-			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "cannot be opened"})
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "cannot be opened", candidate.optional})
 			continue
 		}
 		h.allowedMediaRoots = append(h.allowedMediaRoots, allowedMediaRoot{path: resolved, lexicalPath: filepath.Clean(absolute), root: opened})
@@ -223,21 +232,34 @@ func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...
 	return h
 }
 
+type mediaRootCandidate struct {
+	path     string
+	optional bool
+}
+
 // mediaRootWarning describes unusable media roots for the operator, or returns
 // empty when everything resolved. Without it an archive indexed against an
 // unmounted volume looks perfectly healthy — chats and search work, and every
 // single attachment 404s with nothing said anywhere about why.
 func (h *handler) mediaRootWarning() string {
-	if len(h.skippedMediaRoots) == 0 {
+	nothingReadable := len(h.allowedMediaRoots) == 0
+	report := make([]skippedMediaRoot, 0, len(h.skippedMediaRoots))
+	for _, skipped := range h.skippedMediaRoots {
+		if skipped.optional && !nothingReadable {
+			continue
+		}
+		report = append(report, skipped)
+	}
+	if len(report) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	if len(h.allowedMediaRoots) == 0 {
+	if nothingReadable {
 		b.WriteString("Warning: no media directory is readable, so attachments will not load.\n")
 	} else {
 		b.WriteString("Warning: some media directories are unreadable; attachments stored there will not load.\n")
 	}
-	for _, skipped := range h.skippedMediaRoots {
+	for _, skipped := range report {
 		_, _ = fmt.Fprintf(&b, "  %s (%s)\n", skipped.path, skipped.reason)
 	}
 	return b.String()
@@ -620,9 +642,7 @@ func inlineContentType(name string, sniff []byte) (string, bool) {
 }
 
 func playableContentType(contentType string) bool {
-	return strings.HasPrefix(contentType, "image/") ||
-		strings.HasPrefix(contentType, "video/") ||
-		strings.HasPrefix(contentType, "audio/")
+	return mediaKindForContentType(contentType) != ""
 }
 
 // inconclusiveSniff reports whether the sniffer failed to place the bytes, in
@@ -668,20 +688,49 @@ func relativeToRoot(root, candidate string) (string, bool) {
 
 // inlineMediaKind classifies an attachment into the family the viewer can render
 // inline — image, video, or audio — and returns empty for everything else, which
-// stays a metadata card. WhatsApp's type strings are loose, so this matches on
-// substrings, ordered so the more specific claim wins: an animated GIF is stored
-// as an mp4 whose type says both "video" and "gif", and belongs in a player.
+// stays a metadata card.
+//
+// The stored file extension decides wherever it is known, for the same reason
+// the served content type comes from it: WhatsApp's type strings describe what a
+// message meant, not what the file is. Measured against a real Desktop store, an
+// animated GIF is typed "gif" in both fields yet stored as an .mp4 and has to
+// play in a video element, and some messages carry an opaque type like "type_54"
+// over an ordinary .mp4. The type strings remain the fallback for anything whose
+// extension is unfamiliar.
 func inlineMediaKind(message store.Message) string {
+	path := strings.TrimSpace(message.MediaPath)
+	if path == "" {
+		// Nothing can be served without a path, and most of an archive's media
+		// rows have none: WhatsApp records the message but never downloaded the
+		// file. Reporting no kind sends those straight to a card instead of
+		// letting the viewer chase thousands of certain 404s while scrolling.
+		return ""
+	}
+	if kind := mediaKindForContentType(mediaContentTypes[strings.ToLower(filepath.Ext(path))]); kind != "" {
+		return kind
+	}
 	hint := strings.ToLower(message.MediaType + " " + message.MessageType)
 	switch {
 	case strings.Contains(hint, "sticker"):
 		return "image"
-	case strings.Contains(hint, "video"), strings.Contains(hint, "movie"):
+	case strings.Contains(hint, "video"), strings.Contains(hint, "movie"), strings.Contains(hint, "gif"):
 		return "video"
 	case strings.Contains(hint, "audio"), strings.Contains(hint, "voice"), strings.Contains(hint, "ptt"):
 		return "audio"
-	case strings.Contains(hint, "image"), strings.Contains(hint, "photo"), strings.Contains(hint, "gif"):
+	case strings.Contains(hint, "image"), strings.Contains(hint, "photo"):
 		return "image"
+	}
+	return ""
+}
+
+func mediaKindForContentType(contentType string) string {
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		return "image"
+	case strings.HasPrefix(contentType, "video/"):
+		return "video"
+	case strings.HasPrefix(contentType, "audio/"):
+		return "audio"
 	}
 	return ""
 }
