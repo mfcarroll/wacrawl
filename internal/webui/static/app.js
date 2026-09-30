@@ -45,6 +45,8 @@
   };
 
   const FETCH_LIMIT = 300;
+  // Server's maxChatListLimit.
+  const CHAT_LIST_LIMIT = 20000;
   const RUN_GAP_MS = 10 * 60 * 1000;
   const SNIPPET_START = "\ue000";
   const SNIPPET_END = "\ue001";
@@ -1184,10 +1186,13 @@
     const request = ++state.viewRequest;
     elements.refresh.disabled = true;
     try {
-      const [status, chats] = await Promise.all([api("/api/status"), api(`/api/chats?limit=500`)]);
+      const [status, chats] = await Promise.all([api("/api/status"), api(`/api/chats?limit=${CHAT_LIST_LIMIT}`)]);
       if (request !== state.viewRequest) return;
       renderStatus(status);
       state.chats = chats;
+      if (chats.length >= CHAT_LIST_LIMIT) {
+        showToast(`Showing the ${CHAT_LIST_LIMIT.toLocaleString()} most recent chats; use search to reach older ones.`);
+      }
       renderChats(!state.listRendered);
       state.listRendered = true;
       if (state.searching) {

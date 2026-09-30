@@ -301,9 +301,14 @@ func TestHandlerRejectsHostMethodsAndInvalidQueries(t *testing.T) {
 		t.Fatalf("post status=%d allow=%q", response.Code, response.Header().Get("Allow"))
 	}
 
-	invalidLimit := request(t, handler, "/api/chats?limit=501", testToken)
-	if invalidLimit.Code != http.StatusBadRequest {
-		t.Fatalf("invalid limit status = %d", invalidLimit.Code)
+	if code := request(t, handler, "/api/chats?limit=501", testToken).Code; code != http.StatusOK {
+		t.Fatalf("chat list limit above a page status = %d, want 200", code)
+	}
+	if code := request(t, handler, "/api/chats?limit=20001", testToken).Code; code != http.StatusBadRequest {
+		t.Fatalf("chat list limit above maximum status = %d, want 400", code)
+	}
+	if code := request(t, handler, "/api/messages?limit=501", testToken).Code; code != http.StatusBadRequest {
+		t.Fatalf("message limit above a page status = %d, want 400", code)
 	}
 
 	emptySearch := request(t, handler, "/api/search?q=", testToken)

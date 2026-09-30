@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- List every chat in the web viewer sidebar, not only the 500 most recent.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

@@ -279,7 +279,7 @@ func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) serveChats(w http.ResponseWriter, r *http.Request) {
-	limit, ok := parseLimit(w, r, 100)
+	limit, ok := parseLimitUpTo(w, r, 100, maxChatListLimit)
 	if !ok {
 		return
 	}
@@ -519,14 +519,24 @@ func parseBefore(w http.ResponseWriter, r *http.Request) (*time.Time, int64, boo
 	return &before, beforePK, true
 }
 
+// Chat rows are small, and a chat missing from the sidebar can't be opened.
+const (
+	maxPageLimit     = 500
+	maxChatListLimit = 20000
+)
+
 func parseLimit(w http.ResponseWriter, r *http.Request, fallback int) (int, bool) {
+	return parseLimitUpTo(w, r, fallback, maxPageLimit)
+}
+
+func parseLimitUpTo(w http.ResponseWriter, r *http.Request, fallback, maxLimit int) (int, bool) {
 	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
 	if raw == "" {
 		return fallback, true
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil || limit < 1 || limit > 500 {
-		http.Error(w, "limit must be between 1 and 500", http.StatusBadRequest)
+	if err != nil || limit < 1 || limit > maxLimit {
+		http.Error(w, fmt.Sprintf("limit must be between 1 and %d", maxLimit), http.StatusBadRequest)
 		return 0, false
 	}
 	return limit, true
