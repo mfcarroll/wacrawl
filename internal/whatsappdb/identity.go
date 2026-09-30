@@ -140,11 +140,16 @@ func incomingMessageAccountIDs(ctx context.Context, chatDBPath string) (map[stri
 			return ids, nil
 		}
 	}
+	// ZTOJID can also hold a group, broadcast, or channel address; counting
+	// those makes a single-account store look like several.
 	if err := collectAccountIDs(ctx, db, `
 select coalesce(ZTOJID,'')
 from ZWAMESSAGE
 where coalesce(ZISFROMME,0)=0
-  and trim(coalesce(ZTOJID,''))<>''`, ids); err != nil {
+  and trim(coalesce(ZTOJID,''))<>''
+  and (lower(trim(ZTOJID)) like '%@s.whatsapp.net'
+    or lower(trim(ZTOJID)) like '%@lid'
+    or lower(trim(ZTOJID)) like '%@c.us')`, ids); err != nil {
 		return nil, err
 	}
 	return ids, nil

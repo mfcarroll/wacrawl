@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Ignore group, broadcast, and channel recipients when deriving the account of a store without account metadata, so single-account iPhone-backup stores are no longer rejected as ambiguous.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

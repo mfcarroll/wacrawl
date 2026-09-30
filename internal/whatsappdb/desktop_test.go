@@ -491,6 +491,35 @@ insert into ZWAMESSAGE values (1, 'remote@s.whatsapp.net');`)
 			t.Fatalf("legacy account candidates = %d, want 3", len(legacy))
 		}
 	})
+	t.Run("group and broadcast recipients are not accounts", func(t *testing.T) {
+		chatPath := filepath.Join(t.TempDir(), chatDBName)
+		db, err := sql.Open("sqlite", chatPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, db, `
+create table ZWAMESSAGE (ZISFROMME integer, ZTOJID varchar);
+insert into ZWAMESSAGE values (0, 'owner@s.whatsapp.net');
+insert into ZWAMESSAGE values (0, 'owner@s.whatsapp.net');
+insert into ZWAMESSAGE values (0, '120363000000000001@g.us');
+insert into ZWAMESSAGE values (0, '120363000000000002@g.us');
+insert into ZWAMESSAGE values (0, 'status@broadcast');
+insert into ZWAMESSAGE values (0, '120363000000000003@newsletter');`)
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		identity, _, err := readAccountIdentity(ctx, filepath.Join(t.TempDir(), axolotlDBName), chatPath)
+		if err != nil {
+			t.Fatalf("non-account recipients made the store ambiguous: %v", err)
+		}
+		want, err := accountFingerprint(map[string]struct{}{"owner@s.whatsapp.net": {}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity != want {
+			t.Fatalf("identity = %q, want the owner's %q", identity, want)
+		}
+	})
 	t.Run("message recipients are ambiguous", func(t *testing.T) {
 		chatPath := filepath.Join(t.TempDir(), chatDBName)
 		db, err := sql.Open("sqlite", chatPath)
