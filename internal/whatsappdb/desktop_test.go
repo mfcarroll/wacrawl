@@ -856,6 +856,53 @@ insert into ZWAMEDIAITEM values (2, 4, 'Media/111@s.whatsapp.net/fallback.pdf', 
 	}
 }
 
+func TestImportDesktopReadsDocumentNameAndCaption(t *testing.T) {
+	ctx := context.Background()
+	source := testutil.TempDir(t)
+	createFixtureDBs(t, source)
+	chatDB, err := sql.Open("sqlite", filepath.Join(source, chatDBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As on iPhone backups: ZTEXT is the name, ZTITLE the caption, ZVCARDNAME a hash.
+	mustExec(t, chatDB, `
+insert into ZWAMEDIAITEM values (10, 10, 'Media/111@s.whatsapp.net/a.pdf', '', 'Here are the notes from today', 'hashA=', 10);
+insert into ZWAMEDIAITEM values (11, 11, 'Media/111@s.whatsapp.net/b.pdf', '', 'Is this the one?', 'hashB=', 11);
+insert into ZWAMEDIAITEM values (12, 12, 'Media/111@s.whatsapp.net/c.pdf', '', '', 'hashC=', 12);
+insert into ZWAMESSAGE values (10, 1, null, 10, 'doc-both', 0, 700000010, 'Meeting Notes', 8, 0, '111@s.whatsapp.net', '', 'Bob');
+insert into ZWAMESSAGE values (11, 1, null, 11, 'doc-caption', 0, 700000011, null, 8, 0, '111@s.whatsapp.net', '', 'Bob');
+insert into ZWAMESSAGE values (12, 1, null, 12, 'doc-name', 0, 700000012, 'Packing List', 8, 0, '111@s.whatsapp.net', '', 'Bob');
+`)
+	if err := chatDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "wacrawl.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+	if _, err := Import(ctx, archive, source); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "111@s.whatsapp.net", Limit: 20, Asc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]store.Message{}
+	for _, message := range messages {
+		got[message.MessageID] = message
+	}
+	for id, want := range map[string]struct{ title, text string }{
+		"doc-both":    {"Meeting Notes", "Here are the notes from today"},
+		"doc-caption": {"hashB=", "Is this the one?"},
+		"doc-name":    {"Packing List", "Packing List"},
+	} {
+		if got[id].MediaTitle != want.title || got[id].Text != want.text {
+			t.Errorf("%s: title=%q text=%q, want title=%q text=%q", id, got[id].MediaTitle, got[id].Text, want.title, want.text)
+		}
+	}
+}
+
 func TestImportDesktopUsesProfilePushNames(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()

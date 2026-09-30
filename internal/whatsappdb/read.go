@@ -304,6 +304,11 @@ order by m.ZMESSAGEDATE asc, m.Z_PK asc`)
 		m.MessageType = messageType(m.RawType)
 		m.MediaType = mediaType(m.RawType)
 		m.MediaTitle = firstNonEmpty(mediaTitle, vcardName)
+		if m.RawType == rawTypeDocument {
+			// Documents swap the columns: ZTEXT is the name, ZTITLE the caption.
+			m.MediaTitle = firstNonEmpty(text.String, vcardName)
+			m.Text = strings.TrimSpace(mediaTitle)
+		}
 		if mediaPath != "" {
 			m.MediaPath = resolveDesktopMediaPath(sourceRoot, mediaPath)
 			m.SourceMediaPathRejected = m.MediaPath == ""
@@ -386,6 +391,8 @@ func messageType(raw int) string {
 		return fmt.Sprintf("type_%d", raw)
 	}
 }
+
+const rawTypeDocument = 8
 
 func mediaType(raw int) string {
 	switch raw {

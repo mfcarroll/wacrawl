@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read document names from ZTEXT and captions from ZTITLE, so documents no longer show their caption as the file name.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.
