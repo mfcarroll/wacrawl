@@ -42,11 +42,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := ensureColumn(ctx, tx, "messages", "source_row_pk", "integer not null default 0"); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `update messages set source_row_pk = source_pk where source_row_pk = 0`); err != nil {
-		return fmt.Errorf("backfill message source-row provenance: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `update messages set event_id = printf('wa:%lld', source_pk) where event_id is null or trim(event_id) = ''`); err != nil {
-		return fmt.Errorf("backfill message event identity: %w", err)
+	// These scan whole tables. They completed in the transaction that set
+	// schemaVersion, and writers have filled the columns since.
+	upgrading := current < schemaVersion
+	if upgrading {
+		if _, err := tx.ExecContext(ctx, `update messages set source_row_pk = source_pk where source_row_pk = 0`); err != nil {
+			return fmt.Errorf("backfill message source-row provenance: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `update messages set event_id = printf('wa:%lld', source_pk) where event_id is null or trim(event_id) = ''`); err != nil {
+			return fmt.Errorf("backfill message event identity: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `create unique index if not exists idx_messages_event_id on messages(event_id)`); err != nil {
 		return fmt.Errorf("index message event identity: %w", err)
@@ -60,10 +65,12 @@ before update of event_id on messages when new.event_id is null or trim(new.even
 begin select raise(abort, 'messages.event_id is required'); end;`); err != nil {
 		return fmt.Errorf("enforce message event identity: %w", err)
 	}
-	for _, table := range []string{"contacts", "chats", "groups", "group_participants", "messages"} {
-		statement := fmt.Sprintf(`update %s set last_seen_at = coalesce((select max(updated_at) from sync_state), 0) where last_seen_at = 0`, table) // #nosec G201 -- table is from the fixed list above.
-		if _, err := tx.ExecContext(ctx, statement); err != nil {                                                                                    //nolint:gosec // table is from the fixed list above.
-			return fmt.Errorf("backfill %s last_seen_at: %w", table, err)
+	if upgrading {
+		for _, table := range []string{"contacts", "chats", "groups", "group_participants", "messages"} {
+			statement := fmt.Sprintf(`update %s set last_seen_at = coalesce((select max(updated_at) from sync_state), 0) where last_seen_at = 0`, table) // #nosec G201 -- table is from the fixed list above.
+			if _, err := tx.ExecContext(ctx, statement); err != nil {                                                                                    //nolint:gosec // table is from the fixed list above.
+				return fmt.Errorf("backfill %s last_seen_at: %w", table, err)
+			}
 		}
 	}
 	// Completed migrations must not block exact restore on destination evidence.

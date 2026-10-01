@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Start the web viewer and load its chat list faster on large archives: skip migration backfills once the schema is current, count per-chat and media messages from new indexes, and show chats before archive totals.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.
