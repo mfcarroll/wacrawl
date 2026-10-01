@@ -17,6 +17,16 @@ const (
 	messageScanColumns   = `source_pk, source_row_pk, event_id, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, media_url, media_size, starred, deleted_at, deletion_source, deletion_reason, last_seen_at, snippet`
 )
 
+// SourceRoot is the bound source, else the last one imported. Unlike Status,
+// it doesn't count every table.
+func (s *Store) SourceRoot(ctx context.Context) string {
+	if root, _ := s.q.GetSyncState(ctx, "merge_source_path"); root != "" {
+		return root
+	}
+	root, _ := s.q.GetSyncState(ctx, "source_path")
+	return root
+}
+
 func (s *Store) Status(ctx context.Context) (Status, error) {
 	out := Status{DBPath: s.path}
 	var err error
@@ -75,10 +85,7 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		out.LastSourceSnapshot, _ = time.Parse(time.RFC3339Nano, value)
 	}
 	out.LastSource, _ = s.q.GetSyncState(ctx, "source_path")
-	out.SourceRoot, _ = s.q.GetSyncState(ctx, "merge_source_path")
-	if out.SourceRoot == "" {
-		out.SourceRoot = out.LastSource
-	}
+	out.SourceRoot = s.SourceRoot(ctx)
 	if value, err := s.q.GetSyncState(ctx, "source_messages"); err == nil {
 		if out.LastSourceMessages, err = strconv.Atoi(value); err == nil {
 			out.SourceMessagesKnown = true

@@ -107,11 +107,8 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	status, err := archive.Status(ctx)
-	if err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("read archive media roots: %w", err)
-	}
+	// Not Status: it counts every table before the address can print.
+	sourceRoot := archive.SourceRoot(ctx)
 	host := listener.Addr().String()
 	url := "http://" + host + "/#" + token
 	output := cfg.Output
@@ -120,7 +117,7 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	}
 	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
 
-	handler := NewHandler(archive, token, host, status.SourceRoot)
+	handler := NewHandler(archive, token, host, sourceRoot)
 	defer handler.close()
 	server := &http.Server{
 		Handler:           handler,
