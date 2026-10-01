@@ -1184,12 +1184,17 @@
     const request = ++state.viewRequest;
     elements.refresh.disabled = true;
     try {
-      const [status, chats] = await Promise.all([api("/api/status"), api(`/api/chats?limit=500`)]);
+      // One DB connection: load chats before the slower totals.
+      const chats = await api(`/api/chats?limit=500`);
       if (request !== state.viewRequest) return;
-      renderStatus(status);
       state.chats = chats;
       renderChats(!state.listRendered);
       state.listRendered = true;
+      api("/api/status")
+        .then((status) => {
+          if (request === state.viewRequest) renderStatus(status);
+        })
+        .catch((error) => showToast(error.message));
       if (state.searching) {
         const query = elements.searchInput.value.trim();
         if (query) await runSearch(query);
