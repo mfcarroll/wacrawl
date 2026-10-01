@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show "Loading messages…" instead of "Decrypting local archive…" while a web viewer chat opens; nothing is decrypted.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

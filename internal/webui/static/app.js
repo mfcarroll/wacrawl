@@ -1048,7 +1048,7 @@
     else setActiveChat(chat.jid);
     showChatView();
     setChatHeader(chat);
-    renderLoading("Decrypting local archive…");
+    renderLoading("Loading messages…");
     try {
       const messages = await api(`/api/messages?chat=${encodeURIComponent(chat.jid)}&limit=${FETCH_LIMIT}`);
       if (request !== state.viewRequest) return;
