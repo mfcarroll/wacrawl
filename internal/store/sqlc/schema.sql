@@ -91,6 +91,8 @@ create index idx_messages_chat_ts on messages(chat_jid, ts);
 create index idx_messages_chat_msg on messages(chat_jid, msg_id);
 create index idx_messages_ts on messages(ts);
 create index idx_messages_sender on messages(sender_jid);
+-- For per-chat counts in the chat list.
+create index idx_messages_chat_live on messages(chat_jid, deleted_at, ts);
 
 -- sqlc does not need FTS behavior here; it only validates archive-store writes.
 -- Runtime schema.go creates the real fts5 virtual table.

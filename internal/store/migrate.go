@@ -56,6 +56,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `create unique index if not exists idx_messages_event_id on messages(event_id)`); err != nil {
 		return fmt.Errorf("index message event identity: %w", err)
 	}
+	// For per-chat counts in the chat list. Created here, once deleted_at exists.
+	if _, err := tx.ExecContext(ctx, `create index if not exists idx_messages_chat_live on messages(chat_jid, deleted_at, ts)`); err != nil {
+		return fmt.Errorf("index live messages per chat: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 create trigger if not exists messages_event_id_required_insert
 before insert on messages when new.event_id is null or trim(new.event_id) = ''

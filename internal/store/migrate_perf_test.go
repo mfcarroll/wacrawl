@@ -3,8 +3,41 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestChatListCountsFromCoveringIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "chatlist.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	// ListChats' message_count.
+	rows, err := st.db.QueryContext(ctx, `explain query plan
+select c.jid, (select count(*) from messages m where m.chat_jid = c.jid and m.deleted_at is null)
+from chats c where c.deleted_at is null`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(plan, "\n"); !strings.Contains(got, "COVERING INDEX idx_messages_chat_live") {
+		t.Fatalf("chat list must count messages from the index; plan:\n%s", got)
+	}
+}
 
 func TestReopenAtCurrentSchemaSkipsBackfills(t *testing.T) {
 	ctx := context.Background()

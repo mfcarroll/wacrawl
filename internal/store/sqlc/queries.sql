@@ -43,11 +43,10 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	-- Answered from idx_messages_chat_live; a join and group by sorts every message.
+	(select count(*) from messages m where m.chat_jid = c.jid and m.deleted_at is null) as message_count
 from chats c
-left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null
-group by c.jid, c.kind, c.name, c.last_message_at, c.unread_count, c.archived, c.removed, c.hidden, c.raw_session_type
 order by case when c.last_message_at > 0 and c.last_message_at <= 253402300799 then c.last_message_at else 0 end desc
 limit sqlc.arg(limit);
 
@@ -62,11 +61,10 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	-- Answered from idx_messages_chat_live; a join and group by sorts every message.
+	(select count(*) from messages m where m.chat_jid = c.jid and m.deleted_at is null) as message_count
 from chats c
-left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null and c.unread_count > 0
-group by c.jid, c.kind, c.name, c.last_message_at, c.unread_count, c.archived, c.removed, c.hidden, c.raw_session_type
 order by case when c.last_message_at > 0 and c.last_message_at <= 253402300799 then c.last_message_at else 0 end desc
 limit sqlc.arg(limit);
 
