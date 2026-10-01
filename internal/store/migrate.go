@@ -60,6 +60,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `create index if not exists idx_messages_chat_live on messages(chat_jid, deleted_at, ts)`); err != nil {
 		return fmt.Errorf("index live messages per chat: %w", err)
 	}
+	// For the media-message total.
+	if _, err := tx.ExecContext(ctx, `create index if not exists idx_messages_media on messages(deleted_at) where media_type <> '' or media_path <> '' or media_url <> ''`); err != nil {
+		return fmt.Errorf("index media messages: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 create trigger if not exists messages_event_id_required_insert
 before insert on messages when new.event_id is null or trim(new.event_id) = ''

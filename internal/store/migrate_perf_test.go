@@ -39,6 +39,24 @@ from chats c where c.deleted_at is null`)
 	}
 }
 
+func TestMediaTotalCountsFromPartialIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "media.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	var id, parent, unused int
+	var detail string
+	if err := st.db.QueryRowContext(ctx, `explain query plan
+select count(*) from messages where deleted_at is null and (media_type <> '' or media_path <> '' or media_url <> '')`).Scan(&id, &parent, &unused, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(detail, "idx_messages_media") {
+		t.Fatalf("media total must use the partial index; plan: %s", detail)
+	}
+}
+
 func TestReopenAtCurrentSchemaSkipsBackfills(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "reopen.db")
