@@ -198,6 +198,19 @@ func resolveImportMessages(ctx context.Context, tx *sql.Tx, restore bool, stats 
 	if err != nil {
 		return nil, err
 	}
+	type legacyKey struct {
+		rowPK         int64
+		discriminator string
+	}
+	legacyCandidates := map[legacyKey][]int{}
+	legacyNext := map[legacyKey]int{}
+	if oldStore == "" {
+		for i := range archived {
+			key, _ := eventDiscriminator(archived[i])
+			identity := legacyKey{archived[i].SourceRowPK, key}
+			legacyCandidates[identity] = append(legacyCandidates[identity], i)
+		}
+	}
 	for i := range resolved {
 		m := &resolved[i]
 		if m.SourceRowPK == 0 {
@@ -237,14 +250,18 @@ func resolveImportMessages(ctx context.Context, tx *sql.Tx, restore bool, stats 
 				mapping.MatchKind = "unique"
 			}
 			if oldStore == "" && match == nil {
-				for j := range archived {
-					old := &archived[j]
-					oldKey, _ := eventDiscriminator(*old)
-					if old.SourceRowPK == m.SourceRowPK && oldKey == rawKey && !storeEvents[old.EventID] {
-						match = old
-						mapping.MatchKind = "legacy"
-						break
+				identity := legacyKey{m.SourceRowPK, rawKey}
+				candidates := legacyCandidates[identity]
+				for next := legacyNext[identity]; next < len(candidates); next++ {
+					old := &archived[candidates[next]]
+					if storeEvents[old.EventID] {
+						legacyNext[identity] = next + 1
+						continue
 					}
+					match = old
+					mapping.MatchKind = "legacy"
+					legacyNext[identity] = next + 1
+					break
 				}
 			}
 			switch {

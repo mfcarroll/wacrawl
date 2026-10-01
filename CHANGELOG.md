@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Avoid repeated full-archive scans during legacy source adoption, preserving duplicate event selection and retained history (#114, #115, thanks @goutamadwant and @bubucilo).
 - Update CrawlKit to v0.16.6 to stay current with the shared crawler toolkit.
 
 ## 0.4.1 - 2026-09-24
