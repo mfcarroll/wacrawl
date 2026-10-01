@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `import --copy-media --media-dir PATH` to copy media outside the archive directory; the web viewer serves it from there.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

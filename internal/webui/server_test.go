@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -507,3 +508,73 @@ func (w *failingResponseWriter) Write([]byte) (int, error) {
 }
 
 func (w *failingResponseWriter) WriteHeader(int) {}
+
+func TestServeServesRecordedMediaDir(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "local.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+	mediaDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	imagePath := filepath.Join(mediaDir, "ab", "photo.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	imageBytes := writeTestPNG(t, imagePath)
+	const jid = "555@s.whatsapp.net"
+	now := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+	if err := archive.MergeAll(ctx, store.ImportStats{FinishedAt: now, MediaCopied: 1, MediaRoot: mediaDir}, nil, []store.Chat{
+		{JID: jid, Kind: "dm", Name: "Media Tester", LastMessageAt: now},
+	}, nil, nil, []store.Message{
+		{SourcePK: 1, ChatJID: jid, MessageID: "p1", Timestamp: now, MediaType: "image", MediaPath: imagePath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	output := &captureWriter{written: make(chan string, 1)}
+	go func() { _ = Serve(ctx, archive, Config{Output: output}) }()
+	var printed string
+	select {
+	case printed = <-output.written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not print its private URL")
+	}
+	var parsed *url.URL
+	for _, field := range strings.Fields(printed) {
+		if strings.HasPrefix(field, "http://") {
+			parsed, err = url.Parse(field)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if parsed == nil {
+		t.Fatalf("no URL in %q", printed)
+	}
+	mediaURL := *parsed
+	mediaURL.Fragment = ""
+	mediaURL.Path = "/api/media"
+	mediaURL.RawQuery = "pk=1"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+parsed.Fragment)
+	response, err := http.DefaultClient.Do(req) // #nosec G704 -- test URL is derived from Serve's fresh loopback listener.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !bytes.Equal(body, imageBytes) {
+		t.Fatalf("media from recorded --media-dir: status=%d bytes=%d want %d", response.StatusCode, len(body), len(imageBytes))
+	}
+}

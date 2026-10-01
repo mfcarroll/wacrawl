@@ -120,7 +120,7 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	}
 	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
 
-	handler := NewHandler(archive, token, host, status.SourceRoot)
+	handler := NewHandler(archive, token, host, append([]string{status.SourceRoot}, archive.CopiedMediaRoots(ctx)...)...)
 	defer handler.close()
 	server := &http.Server{
 		Handler:           handler,
@@ -150,7 +150,7 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 }
 
 func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...string) *handler {
-	mediaRoots := []string{filepath.Join(filepath.Dir(archive.Path()), "media")}
+	mediaRoots := []string{archive.DefaultMediaRoot()}
 	for _, root := range sourceRoots {
 		if strings.TrimSpace(root) != "" && filepath.IsAbs(root) {
 			mediaRoots = append(mediaRoots, root)

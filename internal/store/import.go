@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/openclaw/wacrawl/internal/mediafile"
 )
 
 func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, groups []Group, participants []GroupParticipant, messages []Message) error {
@@ -251,5 +254,44 @@ on conflict(key) do update set value=excluded.value, updated_at=excluded.updated
 			return err
 		}
 	}
+	if stats.MediaCopied > 0 {
+		if err := s.recordCopiedMediaRoot(ctx, tx, stats.MediaRoot, observedAt); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// copiedMediaRootsKey records --media-dir directories so the viewer can serve them.
+const copiedMediaRootsKey = "copied_media_roots"
+
+func (s *Store) recordCopiedMediaRoot(ctx context.Context, tx *sql.Tx, root string, observedAt int64) error {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	// The viewer always serves the default directory.
+	if def, err := mediafile.Resolve(s.DefaultMediaRoot()); err == nil && def == root {
+		return nil
+	}
+	var raw string
+	if err := tx.QueryRowContext(ctx, `select value from sync_state where key=?`, copiedMediaRootsKey).Scan(&raw); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	var roots []string
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &roots); err != nil {
+			return fmt.Errorf("read %s: %w", copiedMediaRootsKey, err)
+		}
+	}
+	if slices.Contains(roots, root) {
+		return nil
+	}
+	encoded, err := json.Marshal(append(roots, root))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values(?,?,?)
+on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at`, copiedMediaRootsKey, string(encoded), observedAt)
+	return err
 }

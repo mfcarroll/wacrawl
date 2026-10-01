@@ -38,6 +38,7 @@ Options:
 
 Import flags:
   --copy-media              Copy referenced media files into the archive media directory.
+  --media-dir PATH          With --copy-media, copy into PATH instead of media/ next to the DB.
   --adopt-source            Bind and merge; requires a verified source account identity.
   --restore                 Exactly replace archive rows instead of merging.
 
@@ -82,11 +83,14 @@ Examples:
 		_, _ = fmt.Fprintf(w, `Snapshot WhatsApp Desktop SQLite data into the archive.
 
 Usage:
-  wacrawl %s [--source PATH] [--copy-media] [--adopt-source] [--restore]
+  wacrawl %s [--source PATH] [--copy-media [--media-dir PATH]] [--adopt-source] [--restore]
 
 Flags:
   --source PATH   WhatsApp Desktop source path.
   --copy-media    Copy referenced media files into media/ next to the archive DB.
+  --media-dir PATH
+                  With --copy-media, copy into PATH instead of media/ next to
+                  the archive DB. The web viewer serves it from there.
   --adopt-source  Bind and merge; requires a verified source account identity.
   --restore       Exactly replace archive rows instead of merging.
 

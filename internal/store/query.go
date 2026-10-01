@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +18,20 @@ const (
 	messageSelectColumns = `source_pk, source_row_pk, event_id, chat_jid, coalesce(chat_name,'') as chat_name, msg_id, coalesce(sender_jid,'') as sender_jid, coalesce(sender_name,'') as sender_name, ts, from_me, coalesce(text,'') as text, raw_type, coalesce(message_type,'') as message_type, coalesce(media_type,'') as media_type, coalesce(media_title,'') as media_title, coalesce(media_path,'') as media_path, coalesce(media_url,'') as media_url, coalesce(media_size,0) as media_size, starred, coalesce(deleted_at,0) as deleted_at, coalesce(deletion_source,'') as deletion_source, coalesce(deletion_reason,'') as deletion_reason, last_seen_at, '' as snippet`
 	messageScanColumns   = `source_pk, source_row_pk, event_id, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, media_url, media_size, starred, deleted_at, deletion_source, deletion_reason, last_seen_at, snippet`
 )
+
+// DefaultMediaRoot is where --copy-media writes without --media-dir.
+func (s *Store) DefaultMediaRoot() string {
+	return filepath.Join(filepath.Dir(s.path), "media")
+}
+
+// CopiedMediaRoots lists the --media-dir directories imports have copied into.
+func (s *Store) CopiedMediaRoots(ctx context.Context) []string {
+	var roots []string
+	if raw, err := s.q.GetSyncState(ctx, copiedMediaRootsKey); err == nil && strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &roots)
+	}
+	return roots
+}
 
 func (s *Store) Status(ctx context.Context) (Status, error) {
 	out := Status{DBPath: s.path}

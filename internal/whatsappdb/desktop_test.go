@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openclaw/wacrawl/internal/mediafile"
 	"github.com/openclaw/wacrawl/internal/store"
 	"github.com/openclaw/wacrawl/internal/testutil"
 	_ "modernc.org/sqlite"
@@ -1666,5 +1667,82 @@ func TestDesktopContactLinkedBarePNToLIDRelogin(t *testing.T) {
 	}
 	if len(stable.Observations) != len(deleted.Observations) || len(stable.Revisions) != len(deleted.Revisions) {
 		t.Fatal("native removed alias repeat grew provenance")
+	}
+}
+
+func TestImportDesktopCopyMediaIntoMediaDir(t *testing.T) {
+	ctx := context.Background()
+	source := testutil.TempDir(t)
+	createFixtureDBs(t, source)
+	mediaPath := filepath.Join(source, "Message", "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(testutil.TempDir(t), "archive.db")
+	archive, err := store.Open(ctx, archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+	mediaDir := filepath.Join(testutil.TempDir(t), "synced", "media")
+
+	for range 2 {
+		stats, err := ImportWithOptions(ctx, archive, ImportOptions{SourcePath: source, CopyMedia: true, MediaRoot: mediaDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.MediaCopied != 1 {
+			t.Fatalf("unexpected media stats: %+v", stats)
+		}
+	}
+	resolved, err := mediafile.Resolve(mediaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "123@g.us", Limit: 10, Asc: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copiedPath string
+	for _, msg := range msgs {
+		if msg.MessageID == "group-image" {
+			copiedPath = msg.MediaPath
+		}
+	}
+	if want := auditMediaObjectPath(resolved, []byte("image")); copiedPath != want {
+		t.Fatalf("copied media path = %q, want %q", copiedPath, want)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(archivePath), "media")); !os.IsNotExist(err) {
+		t.Fatalf("default media directory should not be created, stat err=%v", err)
+	}
+	if roots := archive.CopiedMediaRoots(ctx); len(roots) != 1 || roots[0] != resolved {
+		t.Fatalf("copied media roots = %q, want [%q]", roots, resolved)
+	}
+}
+
+func TestImportDesktopCopyMediaDefaultDirIsNotRecorded(t *testing.T) {
+	ctx := context.Background()
+	source := testutil.TempDir(t)
+	createFixtureDBs(t, source)
+	mediaPath := filepath.Join(source, "Message", "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := store.Open(ctx, filepath.Join(testutil.TempDir(t), "archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+	if _, err := ImportWithOptions(ctx, archive, ImportOptions{SourcePath: source, CopyMedia: true}); err != nil {
+		t.Fatal(err)
+	}
+	if roots := archive.CopiedMediaRoots(ctx); len(roots) != 0 {
+		t.Fatalf("default media directory should not be recorded, got %q", roots)
 	}
 }

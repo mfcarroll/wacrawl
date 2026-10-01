@@ -62,6 +62,8 @@ Explicit WhatsApp signals create source-attributed tombstones instead of deletin
 
 By default, media paths continue to point into WhatsApp Desktop's app container. `--copy-media` copies referenced files into `media/` beside the archive and rewrites the imported paths. Missing media is counted but does not fail the import.
 
+`--media-dir PATH`, with `--copy-media`, copies into `PATH` instead, for example to keep the database on a local disk and media on a larger or synced one. The web viewer serves it from there.
+
 ## Read commands
 
 ### `doctor`

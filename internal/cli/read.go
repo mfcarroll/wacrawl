@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/openclaw/wacrawl/internal/store"
 	"github.com/openclaw/wacrawl/internal/whatsappdb"
@@ -64,6 +65,7 @@ func (a *app) runImport(ctx context.Context, command string, args []string) erro
 	fs.SetOutput(io.Discard)
 	source := fs.String("source", a.source, "")
 	copyMedia := fs.Bool("copy-media", false, "")
+	mediaDir := fs.String("media-dir", "", "")
 	restore := fs.Bool("restore", false, "")
 	adoptSource := fs.Bool("adopt-source", false, "")
 	if err := fs.Parse(args); err != nil {
@@ -76,11 +78,14 @@ func (a *app) runImport(ctx context.Context, command string, args []string) erro
 	if fs.NArg() != 0 {
 		return usageErr(fmt.Errorf("%s takes flags only", command))
 	}
+	if strings.TrimSpace(*mediaDir) != "" && !*copyMedia {
+		return usageErr(errors.New("--media-dir requires --copy-media"))
+	}
 	if *restore && *adoptSource {
 		return usageErr(errors.New("--restore and --adopt-source are mutually exclusive"))
 	}
 	return a.withStore(ctx, func(st *store.Store) error {
-		stats, err := whatsappdb.ImportWithOptions(ctx, st, whatsappdb.ImportOptions{SourcePath: *source, CopyMedia: *copyMedia, Restore: *restore, AdoptSource: *adoptSource})
+		stats, err := whatsappdb.ImportWithOptions(ctx, st, whatsappdb.ImportOptions{SourcePath: *source, CopyMedia: *copyMedia, MediaRoot: *mediaDir, Restore: *restore, AdoptSource: *adoptSource})
 		if err != nil {
 			return err
 		}

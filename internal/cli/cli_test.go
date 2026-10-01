@@ -529,6 +529,10 @@ func TestRunUsageErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("expected mutually exclusive error, got %v", err)
 	}
+	err = Run(context.Background(), []string{"import", "--media-dir", t.TempDir()}, &stdout, &stderr)
+	if err == nil || ExitCode(err) != 2 || !strings.Contains(err.Error(), "--media-dir requires --copy-media") {
+		t.Fatalf("expected --media-dir usage error, got %v", err)
+	}
 	err = Run(context.Background(), []string{"messages", "--after", "nope"}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "invalid time") {
 		t.Fatalf("expected invalid time error, got %v", err)

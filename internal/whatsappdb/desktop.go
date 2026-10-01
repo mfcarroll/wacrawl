@@ -111,7 +111,7 @@ func ImportWithOptions(ctx context.Context, st *store.Store, opts ImportOptions)
 	}
 	mediaRoot := opts.MediaRoot
 	if strings.TrimSpace(mediaRoot) == "" {
-		mediaRoot = filepath.Join(filepath.Dir(st.Path()), "media")
+		mediaRoot = st.DefaultMediaRoot()
 	}
 	mediaRoot, err = prepareMediaRoot(sourcePath, mediaRoot)
 	if err != nil {
