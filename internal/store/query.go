@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -78,6 +79,9 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 	out.SourceRoot, _ = s.q.GetSyncState(ctx, "merge_source_path")
 	if out.SourceRoot == "" {
 		out.SourceRoot = out.LastSource
+	}
+	if raw, err := s.q.GetSyncState(ctx, archivedSourceRootsKey); err == nil && strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &out.ArchivedSourceRoots)
 	}
 	if value, err := s.q.GetSyncState(ctx, "source_messages"); err == nil {
 		if out.LastSourceMessages, err = strconv.Atoi(value); err == nil {

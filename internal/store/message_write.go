@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func upsertMessage(ctx context.Context, tx *sql.Tx, m Message, observedAt time.Time, mediaRoots ...string) error {
+func upsertMessage(ctx context.Context, tx *sql.Tx, m Message, observedAt time.Time, retention mediaRetention) error {
 	sourcePayloadCleared := m.SourceTextNull && !m.SourceMediaPathRejected && m.RawType == 0 && m.MediaTitle == "" && m.MediaType == "" && m.MediaPath == "" && m.MediaURL == "" && m.DeletedAt.IsZero()
 	preserveExistingFTS := false
 	if m.EventID == "" {
@@ -34,11 +34,14 @@ func upsertMessage(ctx context.Context, tx *sql.Tx, m Message, observedAt time.T
 			m.Tombstone = sourceTombstone(observedAt, "whatsapp_payload_cleared")
 			preserveExistingFTS = messageHasPayload(existing)
 		}
-		if !sourcePayloadCleared && m.DeletedAt.IsZero() && len(mediaRoots) != 0 {
-			m, err = retainArchivedMedia(mediaRoots[0], existing, m)
+		if !sourcePayloadCleared && m.DeletedAt.IsZero() && retention.copied != "" {
+			m, err = retainArchivedMedia(retention.copied, existing, m)
 			if err != nil {
 				return err
 			}
+		}
+		if !sourcePayloadCleared && m.DeletedAt.IsZero() {
+			m = retainArchivedSourceMedia(retention.archived, existing, m)
 		}
 		m.EventID = existing.EventID
 		previous, err := canonicalMessageJSON(existing)

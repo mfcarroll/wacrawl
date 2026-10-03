@@ -176,7 +176,7 @@ func tombstoneSubordinates(ctx context.Context, tx *sql.Tx, observedAt time.Time
 		for _, m := range messages {
 			m.LastSeenAt = observedAt
 			m.sourceMapping = &SourceMapping{AccountIdentity: stats.AccountIdentity, SourceStoreIdentity: stats.SourceStoreIdentity}
-			if err := upsertMessage(ctx, tx, m, observedAt); err != nil {
+			if err := upsertMessage(ctx, tx, m, observedAt, mediaRetention{}); err != nil {
 				return err
 			}
 		}

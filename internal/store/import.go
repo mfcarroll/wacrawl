@@ -192,12 +192,24 @@ last_seen_at=excluded.last_seen_at`,
 			return err
 		}
 	}
-	var mediaRoots []string
+	var retention mediaRetention
 	if !restore && stats.SourceIdentity != "" && stats.MediaRoot != "" {
-		mediaRoots = []string{stats.MediaRoot}
+		retention.copied = stats.MediaRoot
+	}
+	if !restore {
+		if stats.AdoptSource {
+			if err := recordArchivedSourceRoot(ctx, tx, mergeSource); err != nil {
+				return err
+			}
+		}
+		archived, err := archivedSourceRoots(ctx, tx)
+		if err != nil {
+			return err
+		}
+		retention.archived = archived
 	}
 	for _, m := range messages {
-		if err := upsertMessage(ctx, tx, m, now, mediaRoots...); err != nil {
+		if err := upsertMessage(ctx, tx, m, now, retention); err != nil {
 			return err
 		}
 	}

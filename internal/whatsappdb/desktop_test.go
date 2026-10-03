@@ -686,6 +686,105 @@ func TestImportDesktopMatchingStoreStillRequiresAdoptionForFirstAccountBinding(t
 	}
 }
 
+func TestImportAdoptsSameAccountSourceAtNewPathAndKeepsItsMedia(t *testing.T) {
+	ctx := context.Background()
+	// History begun from an iPhone backup, continued from WhatsApp Desktop:
+	// the same account at two different source paths.
+	backup, desktop := testutil.TempDir(t), testutil.TempDir(t)
+	for _, source := range []string{backup, desktop} {
+		createFixtureDBs(t, source)
+		chatDB, err := sql.Open("sqlite", filepath.Join(source, chatDBName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, chatDB, `update ZWAMESSAGE set ZTOJID='fixture-owner@s.whatsapp.net' where ZISFROMME=0`)
+		if source == desktop {
+			// Desktop has the photo's message but never downloaded the photo.
+			mustExec(t, chatDB, `update ZWAMEDIAITEM set ZMEDIALOCALPATH='' where Z_PK=1`)
+		}
+		if err := chatDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		axolotlDB, err := sql.Open("sqlite", filepath.Join(source, axolotlDBName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, axolotlDB, `delete from ZWAZMDACCOUNT; insert into ZWAZMDACCOUNT values (1, 'fixture-owner@s.whatsapp.net', 'fixture-owner@s.whatsapp.net')`)
+		if err := axolotlDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	photo := filepath.Join(backup, "Message", "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(photo), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(photo, []byte("jpeg bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "archive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+	if _, err := Import(ctx, archive, backup); err != nil {
+		t.Fatal(err)
+	}
+	photoPath := func() string {
+		t.Helper()
+		messages, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "123@g.us", Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, message := range messages {
+			if message.MediaType == "image" {
+				return message.MediaPath
+			}
+		}
+		t.Fatal("image message missing")
+		return ""
+	}
+	before := photoPath()
+	if before == "" {
+		t.Fatal("backup import did not record the photo")
+	}
+
+	// A routine import from the new path is still refused...
+	if _, err := ImportWithOptions(ctx, archive, ImportOptions{SourcePath: desktop}); err == nil || !strings.Contains(err.Error(), "bound to WhatsApp source") {
+		t.Fatalf("routine import from a new path error = %v, want a source binding refusal", err)
+	}
+	// ...but an explicit adoption by the same verified account moves it.
+	if _, err := ImportWithOptions(ctx, archive, ImportOptions{SourcePath: desktop, AdoptSource: true}); err != nil {
+		t.Fatalf("adopting the same account at a new path: %v", err)
+	}
+	if after := photoPath(); after != before {
+		t.Fatalf("photo path after adoption = %q, want the backup's %q kept", after, before)
+	}
+	status, err := archive.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(p string) string {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			return real
+		}
+		return p
+	}
+	if resolve(status.SourceRoot) != resolve(desktop) {
+		t.Fatalf("source root = %q, want the adopted %q", status.SourceRoot, desktop)
+	}
+	if len(status.ArchivedSourceRoots) != 1 || resolve(status.ArchivedSourceRoots[0]) != resolve(backup) {
+		t.Fatalf("archived source roots = %v, want [%s]", status.ArchivedSourceRoots, backup)
+	}
+	// A later routine import from the adopted source keeps the photo too.
+	if _, err := ImportWithOptions(ctx, archive, ImportOptions{SourcePath: desktop}); err != nil {
+		t.Fatalf("routine import after adoption: %v", err)
+	}
+	if after := photoPath(); after != before {
+		t.Fatalf("photo path after a later import = %q, want %q", after, before)
+	}
+}
+
 func TestImportDesktopMigratesLegacyAccountBinding(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()

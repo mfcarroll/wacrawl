@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -29,6 +31,47 @@ type SourceObservation struct {
 	SourceMapping
 	PayloadJSON string    `json:"payload_json"`
 	RecordedAt  time.Time `json:"recorded_at"`
+}
+
+// archivedSourceRootsKey holds earlier --adopt-source roots as a JSON array.
+const archivedSourceRootsKey = "archived_source_roots"
+
+func archivedSourceRoots(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	raw, err := sourceState(ctx, tx, archivedSourceRootsKey)
+	if err != nil || raw == "" {
+		return nil, err
+	}
+	var roots []string
+	if err := json.Unmarshal([]byte(raw), &roots); err != nil {
+		return nil, fmt.Errorf("read %s: %w", archivedSourceRootsKey, err)
+	}
+	return roots, nil
+}
+
+// recordArchivedSourceRoot skips wa-store: identities, which aren't paths.
+func recordArchivedSourceRoot(ctx context.Context, tx *sql.Tx, next string) error {
+	previous, err := sourceState(ctx, tx, "merge_source_path")
+	if err != nil {
+		return err
+	}
+	next = strings.TrimSpace(next)
+	if previous == "" || previous == next || strings.HasPrefix(previous, "wa-store:") || !filepath.IsAbs(previous) {
+		return nil
+	}
+	roots, err := archivedSourceRoots(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(roots, previous) {
+		return nil
+	}
+	encoded, err := json.Marshal(append(roots, previous))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `insert into sync_state(key,value,updated_at) values(?,?,?)
+on conflict(key) do update set value=excluded.value, updated_at=excluded.updated_at`, archivedSourceRootsKey, string(encoded), unix(time.Now()))
+	return err
 }
 
 func sourceState(ctx context.Context, tx *sql.Tx, key string) (string, error) {

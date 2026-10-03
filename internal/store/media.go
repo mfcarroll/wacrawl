@@ -8,6 +8,29 @@ import (
 	"github.com/openclaw/wacrawl/internal/mediafile"
 )
 
+// mediaRetention holds the roots whose media an import keeps when the new
+// source lacks it: --copy-media's directory, and earlier --adopt-source roots.
+type mediaRetention struct {
+	copied   string
+	archived []string
+}
+
+// retainArchivedSourceMedia reads no file: an archived root may be cloud
+// storage, where opening a file downloads it.
+func retainArchivedSourceMedia(roots []string, old, incoming Message) Message {
+	// Compare raw types too: some (round video notes) have no media type.
+	if incoming.MediaPath != "" || old.MediaPath == "" || old.RawType != incoming.RawType || old.MediaType != incoming.MediaType {
+		return incoming
+	}
+	for _, root := range roots {
+		if mediafile.Within(root, old.MediaPath) {
+			incoming.MediaPath = old.MediaPath
+			return incoming
+		}
+	}
+	return incoming
+}
+
 func sameAttachment(a, b Message) bool {
 	return a.MediaType != "" && (a.MediaURL != "" || a.MediaSize > 0) &&
 		a.RawType == b.RawType && a.MediaType == b.MediaType &&

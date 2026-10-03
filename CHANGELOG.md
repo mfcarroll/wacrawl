@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Let `import --adopt-source` move an archive to a source at a new path when the account is verified as the same, keeping the earlier source's media.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

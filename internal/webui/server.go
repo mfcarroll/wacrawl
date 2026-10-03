@@ -120,7 +120,7 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	}
 	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
 
-	handler := NewHandler(archive, token, host, status.SourceRoot)
+	handler := NewHandler(archive, token, host, append([]string{status.SourceRoot}, status.ArchivedSourceRoots...)...)
 	defer handler.close()
 	server := &http.Server{
 		Handler:           handler,

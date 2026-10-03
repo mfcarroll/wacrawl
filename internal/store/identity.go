@@ -96,13 +96,16 @@ func validateImportSource(ctx context.Context, tx *sql.Tx, restore bool, stats I
 	}
 	incomingStore := strings.TrimSpace(stats.SourceStoreIdentity)
 	sameAccount := existingAccount != "" && existingAccount == accountIdentity
+	// The same verified account may adopt a source at a new path; the old
+	// root's media stays served (recordArchivedSourceRoot).
+	relocating := stats.AdoptSource && sameAccount
 	if existingStore != "" && incomingStore != existingStore && (!sameAccount || incomingStore == "") {
 		return "", errors.New("archive is bound to a different WhatsApp Desktop store; use a separate --db or import --restore")
 	}
-	if strongSource != "" && existingStrong != "" && strongSource != existingStrong {
+	if strongSource != "" && existingStrong != "" && strongSource != existingStrong && !relocating {
 		return "", fmt.Errorf("archive is bound to WhatsApp source %q, not %q; use a separate --db or import --restore", existingStrong, strongSource)
 	}
-	if existingStrong == "" && existingWeak != "" && weakSource != existingWeak {
+	if existingStrong == "" && existingWeak != "" && weakSource != existingWeak && !relocating {
 		return "", fmt.Errorf("archive is bound to WhatsApp source path %q, not %q; use a separate --db or import --restore", existingWeak, weakSource)
 	}
 	if strongSource != "" {

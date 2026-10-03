@@ -50,6 +50,8 @@ type Status struct {
 	LastSourceSnapshot  time.Time `json:"-"`
 	LastSource          string    `json:"last_source,omitempty"`
 	SourceRoot          string    `json:"-"`
+	// ArchivedSourceRoots are earlier --adopt-source roots; their media is still served.
+	ArchivedSourceRoots []string  `json:"-"`
 	LastSourceMessages  int       `json:"last_source_messages,omitempty"`
 	LastSourceContacts  int       `json:"last_source_contacts,omitempty"`
 	SourceMessagesKnown bool      `json:"-"`
