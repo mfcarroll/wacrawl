@@ -210,19 +210,24 @@ Examples:
 		_, _ = fmt.Fprint(w, `Browse the local archive in a private web viewer.
 
 The viewer binds only to 127.0.0.1 and requires a random key printed in its URL.
-It reads archive status, chats, messages, and search results, with inline previews
-for local images. Media reads stay confined to known archive and source roots.
-The viewer does not expose configuration or write controls.
+It reads archive status, chats, messages, and search results, and plays back
+photos, video, and voice notes. Media reads stay confined to known archive and
+source roots. The viewer does not expose configuration or write controls.
 
 Usage:
-  wacrawl web [--port N]
+  wacrawl web [--port N] [--allow-cloud-media]
 
 Flags:
-  --port N   Loopback port. Default: choose a free random port.
+  --port N             Loopback port. Default: choose a free random port.
+  --allow-cloud-media  Fetch media that a cloud provider is holding remotely
+                       (Google Drive, iCloud) instead of reporting it missing.
+                       Off by default, because WhatsApp Desktop leaves stubs for
+                       media it never downloaded and fetching those would stall.
 
 Examples:
   wacrawl web
   wacrawl --sync never web --port 8787
+  wacrawl --source ~/Archive/WhatsApp --sync never web --allow-cloud-media
 `)
 	case "backup":
 		_, _ = fmt.Fprint(w, `Manage encrypted Git backups of the wacrawl archive.

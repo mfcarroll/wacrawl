@@ -751,6 +751,8 @@
       img.alt = mediaTitleOf(message) || MEDIA_PLACEHOLDER[mediaKind(message)] || "Attachment";
       img.decoding = "async";
       img.addEventListener("load", () => figure.classList.remove("loading"), { once: true });
+      // A 200 can still fail to decode (HEIC outside Safari, a truncated file).
+      img.addEventListener("error", () => figure.replaceWith(mediaCard(message)), { once: true });
       img.src = url;
       figure.append(img);
       figure.addEventListener("click", () => showLightbox(url, img.alt));
@@ -772,7 +774,31 @@
   }
 
   function canInlineImage(message) {
-    return message.source_pk > 0 && ["image", "gif", "sticker"].includes(mediaKind(message));
+    return message.source_pk > 0 && message.media_kind === "image";
+  }
+
+  // ---------- Inline players ----------
+  // Players stream the signed URL: they can't send the bearer header, and a
+  // blob would download whole files and break seeking.
+
+  function canPlayInline(message) {
+    return Boolean(message.media_src);
+  }
+
+  function inlinePlayerNode(message) {
+    const kind = message.media_kind;
+    const player = document.createElement(kind === "audio" ? "audio" : "video");
+    player.className = `media-player kind-${kind}`;
+    player.controls = true;
+    // Fetch nothing until play: preloading a chat's videos from a cloud folder
+    // would pull gigabytes.
+    player.preload = "none";
+    player.playsInline = true;
+    player.src = message.media_src;
+    player.setAttribute("aria-label", mediaTitleOf(message) || MEDIA_PLACEHOLDER[kind] || "Attachment");
+    // Missing, unreadable, or undecodable here.
+    player.addEventListener("error", () => player.replaceWith(mediaCard(message)), { once: true });
+    return player;
   }
 
   // WhatsApp stores the media content hash (44-char base64 of a 32-byte
@@ -892,7 +918,9 @@
     }
 
     if (message.media_type || message.media_title || (message.message_type && message.message_type !== "text" && message.message_type !== "link")) {
-      bubble.append(canInlineImage(message) ? inlineImageNode(message) : mediaCard(message));
+      if (canInlineImage(message)) bubble.append(inlineImageNode(message));
+      else if (canPlayInline(message)) bubble.append(inlinePlayerNode(message));
+      else bubble.append(mediaCard(message));
     }
 
     const body = document.createElement("span");

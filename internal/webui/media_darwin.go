@@ -26,3 +26,9 @@ func fileMaterialized(info os.FileInfo) bool {
 func openMediaFile(root *os.Root, path string) (*os.File, error) {
 	return root.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 G703 -- containedMediaPath resolves and confines the path before this rooted call.
 }
+
+// openMediaFileBlocking omits O_NONBLOCK so a cloud provider materializes a
+// dataless file instead of failing the open.
+func openMediaFileBlocking(root *os.Root, path string) (*os.File, error) {
+	return root.OpenFile(path, os.O_RDONLY, 0) // #nosec G304 G703 -- containedMediaPath resolves and confines the path before this rooted call.
+}

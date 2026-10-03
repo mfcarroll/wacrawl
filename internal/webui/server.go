@@ -2,7 +2,9 @@ package webui
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
@@ -30,13 +32,22 @@ const (
 	snippetEndMarker   = "\ue001"
 
 	// maxInlineMediaBytes caps how large an archived image may be before the
-	// viewer falls back to the metadata card instead of inlining bytes.
+	// viewer falls back to the metadata card instead of inlining bytes. Images
+	// only: video and audio stream in ranges.
 	maxInlineMediaBytes = 25 << 20
+
+	// mediaURLTTL limits a signed link leaked from a long-open page. Links also
+	// die with the server, whose per-run token is the signing key.
+	mediaURLTTL = 12 * time.Hour
 )
 
 type Config struct {
 	Port   int
 	Output io.Writer
+	// AllowCloudMedia materializes dataless (cloud-synced) media on demand. Off
+	// by default: Desktop leaves stubs for media it never downloaded, and
+	// blocking on those would hang the request.
+	AllowCloudMedia bool
 }
 
 type handler struct {
@@ -44,12 +55,22 @@ type handler struct {
 	token             string
 	allowedHost       string
 	allowedMediaRoots []allowedMediaRoot
+	skippedMediaRoots []skippedMediaRoot
+	allowCloudMedia   bool
 }
 
 type allowedMediaRoot struct {
 	path        string
 	lexicalPath string
 	root        *os.Root
+}
+
+// skippedMediaRoot is a media root the viewer couldn't use, reported at startup.
+type skippedMediaRoot struct {
+	path   string
+	reason string
+	// optional roots are reported only when nothing is readable.
+	optional bool
 }
 
 type statusResponse struct {
@@ -91,6 +112,12 @@ type messageResponse struct {
 	MediaSize   int64     `json:"media_size,omitempty"`
 	Starred     bool      `json:"starred,omitempty"`
 	Snippet     string    `json:"snippet,omitempty"`
+	// MediaKind is image, video, or audio, or empty for a card.
+	MediaKind string `json:"media_kind,omitempty"`
+	// MediaSrc is a signed link for kinds the browser loads by URL. Not called
+	// media_url: store.Message.MediaURL is WhatsApp's CDN address, which must
+	// never leave this process.
+	MediaSrc string `json:"media_src,omitempty"`
 }
 
 func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
@@ -118,10 +145,17 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 	if output == nil {
 		output = io.Discard
 	}
+	// Print the URL first: resolving a media root can block (an unmounted
+	// volume, a privacy prompt).
 	_, _ = fmt.Fprintf(output, "wacrawl web viewer\n%s\n\nLocal and read-only. Keep this URL private; Ctrl-C stops the server.\n", url)
 
 	handler := NewHandler(archive, token, host, status.SourceRoot)
+	handler.allowCloudMedia = cfg.AllowCloudMedia
 	defer handler.close()
+	if warning := handler.mediaRootWarning(); warning != "" {
+		_, _ = fmt.Fprintf(output, "\n%s", warning)
+	}
+
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -150,29 +184,71 @@ func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
 }
 
 func NewHandler(archive *store.Store, token, allowedHost string, sourceRoots ...string) *handler {
-	mediaRoots := []string{filepath.Join(filepath.Dir(archive.Path()), "media")}
-	for _, root := range sourceRoots {
-		if strings.TrimSpace(root) != "" && filepath.IsAbs(root) {
-			mediaRoots = append(mediaRoots, root)
-		}
-	}
 	h := &handler{store: archive, token: token, allowedHost: allowedHost}
-	for _, root := range mediaRoots {
-		absolute, err := filepath.Abs(root)
+	// Exists only after an import with --copy-media.
+	candidates := []mediaRootCandidate{{filepath.Join(filepath.Dir(archive.Path()), "media"), true}}
+	for _, root := range sourceRoots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		// Relative means not a path: older archives hold a "wa-store:" identity.
+		if !filepath.IsAbs(trimmed) {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{trimmed, "not an absolute path", false})
+			continue
+		}
+		candidates = append(candidates, mediaRootCandidate{trimmed, false})
+	}
+	for _, candidate := range candidates {
+		absolute, err := filepath.Abs(candidate.path)
 		if err != nil {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{candidate.path, "cannot be resolved", candidate.optional})
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(absolute)
 		if err != nil {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "missing or unreadable", candidate.optional})
 			continue
 		}
 		opened, err := os.OpenRoot(resolved)
 		if err != nil {
+			h.skippedMediaRoots = append(h.skippedMediaRoots, skippedMediaRoot{absolute, "cannot be opened", candidate.optional})
 			continue
 		}
 		h.allowedMediaRoots = append(h.allowedMediaRoots, allowedMediaRoot{path: resolved, lexicalPath: filepath.Clean(absolute), root: opened})
 	}
 	return h
+}
+
+type mediaRootCandidate struct {
+	path     string
+	optional bool
+}
+
+// mediaRootWarning explains unusable media roots, which otherwise make every
+// attachment 404 silently.
+func (h *handler) mediaRootWarning() string {
+	nothingReadable := len(h.allowedMediaRoots) == 0
+	report := make([]skippedMediaRoot, 0, len(h.skippedMediaRoots))
+	for _, skipped := range h.skippedMediaRoots {
+		if skipped.optional && !nothingReadable {
+			continue
+		}
+		report = append(report, skipped)
+	}
+	if len(report) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if nothingReadable {
+		b.WriteString("Warning: no media directory is readable, so attachments will not load.\n")
+	} else {
+		b.WriteString("Warning: some media directories are unreadable; attachments stored there will not load.\n")
+	}
+	for _, skipped := range report {
+		_, _ = fmt.Fprintf(&b, "  %s (%s)\n", skipped.path, skipped.reason)
+	}
+	return b.String()
 }
 
 func (h *handler) close() {
@@ -212,7 +288,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !h.authorized(r) {
+	// Media is the one endpoint a signed URL can reach without the header, because
+	// <video> and <audio> cannot send one.
+	authorized := h.authorized(r) || h.signedMediaRequest(r, time.Now())
+	if !authorized {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "authorization required", http.StatusUnauthorized)
 		return
@@ -256,6 +335,43 @@ func (h *handler) authorized(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(candidate), []byte(h.token)) == 1
+}
+
+// mediaSignature signs one attachment's URL with the per-run token, for
+// elements that can't send the Authorization header. The purpose (endpoint) is
+// signed too, so a link for one endpoint can't be replayed against another.
+func (h *handler) mediaSignature(purpose string, sourcePK, expiry int64) string {
+	mac := hmac.New(sha256.New, []byte(h.token))
+	// Delimited so no other purpose, pk, and expiry can produce the same input.
+	_, _ = fmt.Fprintf(mac, "%s\x00%d\x00%d", purpose, sourcePK, expiry)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (h *handler) signedURL(purpose string, sourcePK int64, now time.Time) string {
+	expiry := now.Add(mediaURLTTL).Unix()
+	return fmt.Sprintf("/api/%s?pk=%d&exp=%d&sig=%s", purpose, sourcePK, expiry, h.mediaSignature(purpose, sourcePK, expiry))
+}
+
+func (h *handler) signedMediaRequest(r *http.Request, now time.Time) bool {
+	purpose := strings.TrimPrefix(r.URL.Path, "/api/")
+	if purpose != "media" {
+		return false
+	}
+	query := r.URL.Query()
+	sourcePK, err := strconv.ParseInt(strings.TrimSpace(query.Get("pk")), 10, 64)
+	if err != nil {
+		return false
+	}
+	expiry, err := strconv.ParseInt(strings.TrimSpace(query.Get("exp")), 10, 64)
+	if err != nil || now.Unix() > expiry {
+		return false
+	}
+	want := h.mediaSignature(purpose, sourcePK, expiry)
+	got := strings.TrimSpace(query.Get("sig"))
+	if len(got) != len(want) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func (h *handler) serveStatus(w http.ResponseWriter, r *http.Request) {
@@ -325,7 +441,7 @@ func (h *handler) serveMessages(w http.ResponseWriter, r *http.Request) {
 	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
 		messages[left], messages[right] = messages[right], messages[left]
 	}
-	writeJSON(w, messagesForWeb(messages))
+	writeJSON(w, h.messagesForWeb(messages))
 }
 
 func (h *handler) serveSearch(w http.ResponseWriter, r *http.Request) {
@@ -350,12 +466,19 @@ func (h *handler) serveSearch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid search query", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, messagesForWeb(messages))
+	writeJSON(w, h.messagesForWeb(messages))
 }
 
-func messagesForWeb(messages []store.Message) []messageResponse {
+func (h *handler) messagesForWeb(messages []store.Message) []messageResponse {
+	now := time.Now()
 	out := make([]messageResponse, 0, len(messages))
 	for _, message := range messages {
+		kind := inlineMediaKind(message)
+		// Images are fetched with the header; only streamed kinds need a URL.
+		mediaSrc := ""
+		if message.SourcePK > 0 && (kind == "video" || kind == "audio") {
+			mediaSrc = h.signedURL("media", message.SourcePK, now)
+		}
 		out = append(out, messageResponse{
 			SourcePK:    message.SourcePK,
 			ChatJID:     message.ChatJID,
@@ -372,15 +495,15 @@ func messagesForWeb(messages []store.Message) []messageResponse {
 			MediaSize:   message.MediaSize,
 			Starred:     message.Starred,
 			Snippet:     message.Snippet,
+			MediaKind:   kind,
+			MediaSrc:    mediaSrc,
 		})
 	}
 	return out
 }
 
-// serveMedia streams archived image bytes for one message so the viewer can
-// render photos, stickers, and GIFs inline. It reads local files referenced by
-// configured archive or source roots, serves only content that sniffs as an
-// image, and never reveals the underlying path.
+// serveMedia serves image, video, and audio bytes from the allowed roots,
+// never revealing the path.
 func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.URL.Query().Get("pk"))
 	sourcePK, err := strconv.ParseInt(raw, 10, 64)
@@ -398,7 +521,8 @@ func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimSpace(message.MediaPath)
-	if path == "" || !inlineImageMessage(message) {
+	kind := inlineMediaKind(message)
+	if path == "" || kind == "" {
 		http.Error(w, "no inline preview", http.StatusNotFound)
 		return
 	}
@@ -407,7 +531,11 @@ func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
-	file, err := openMediaFile(root, path)
+	open := openMediaFile
+	if h.allowCloudMedia {
+		open = openMediaFileBlocking
+	}
+	file, err := open(root, path)
 	if err != nil {
 		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
@@ -418,13 +546,10 @@ func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
-	if info.Size() > maxInlineMediaBytes {
-		http.Error(w, "media too large for inline preview", http.StatusRequestEntityTooLarge)
-		return
-	}
 	// WhatsApp keeps stubs for media it has not downloaded; reading one blocks
 	// until macOS materializes it, which can wedge the request indefinitely.
-	if !fileMaterialized(info) {
+	// Cloud-synced archives want exactly that (AllowCloudMedia).
+	if !h.allowCloudMedia && !fileMaterialized(info) {
 		http.Error(w, "media not downloaded locally", http.StatusNotFound)
 		return
 	}
@@ -434,19 +559,76 @@ func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
-	sniff = sniff[:n]
-	contentType := http.DetectContentType(sniff)
-	if !strings.HasPrefix(contentType, "image/") {
+	contentType, ok := inlineContentType(path, sniff[:n])
+	if !ok {
 		http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 		return
 	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(sniff); err != nil {
+	if strings.HasPrefix(contentType, "image/") && info.Size() > maxInlineMediaBytes {
+		http.Error(w, "media too large for inline preview", http.StatusRequestEntityTooLarge)
 		return
 	}
-	_, _ = io.Copy(w, file)
+	w.Header().Set("Content-Type", contentType)
+	// ServeContent for range requests: seeking needs them, and Safari won't play
+	// without. It rewinds past the sniffed bytes.
+	http.ServeContent(w, r, "", info.ModTime(), file)
+}
+
+// Go's sniffer misses QuickTime, 3GP, CAF, and AMR, and calls an .m4a
+// voice note video/mp4.
+var mediaContentTypes = map[string]string{
+	".bmp":  "image/bmp",
+	".gif":  "image/gif",
+	".heic": "image/heic",
+	".jpeg": "image/jpeg",
+	".jpg":  "image/jpeg",
+	".png":  "image/png",
+	".webp": "image/webp",
+
+	".3gp":  "video/3gpp",
+	".avi":  "video/x-msvideo",
+	".m4v":  "video/mp4",
+	".mkv":  "video/x-matroska",
+	".mov":  "video/quicktime",
+	".mp4":  "video/mp4",
+	".webm": "video/webm",
+
+	".aac":  "audio/aac",
+	".amr":  "audio/amr",
+	".caf":  "audio/x-caf",
+	".m4a":  "audio/mp4",
+	".mp3":  "audio/mpeg",
+	".oga":  "audio/ogg",
+	".ogg":  "audio/ogg",
+	".opus": "audio/ogg",
+	".wav":  "audio/wav",
+}
+
+// inlineContentType picks the type to serve, or refuses. The extension wins
+// for media, but the sniffer can veto (a PDF named .mp4). kind is the last
+// resort for a file without an extension.
+func inlineContentType(name string, sniff []byte) (string, bool) {
+	sniffed := http.DetectContentType(sniff)
+	if !playableContentType(sniffed) && !inconclusiveSniff(sniffed) {
+		return "", false
+	}
+	if byExtension := mediaContentTypes[strings.ToLower(filepath.Ext(name))]; byExtension != "" {
+		return byExtension, true
+	}
+	if playableContentType(sniffed) {
+		return sniffed, true
+	}
+	return "", false
+}
+
+func playableContentType(contentType string) bool {
+	return mediaKindForContentType(contentType) != ""
+}
+
+// inconclusiveSniff reports bytes the sniffer couldn't place. Ogg counts: it
+// can't tell an Opus voice note from other Ogg.
+func inconclusiveSniff(contentType string) bool {
+	return contentType == "application/octet-stream" || contentType == "application/ogg"
 }
 
 func containedMediaPath(path string, roots []allowedMediaRoot) (*os.Root, string, bool) {
@@ -482,14 +664,56 @@ func relativeToRoot(root, candidate string) (string, bool) {
 	return relative, err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)) && !filepath.IsAbs(relative)
 }
 
-func inlineImageMessage(message store.Message) bool {
-	hint := strings.ToLower(message.MediaType + " " + message.MessageType)
-	for _, kind := range []string{"image", "photo", "sticker", "gif"} {
-		if strings.Contains(hint, kind) {
-			return true
-		}
+// inlineMediaKind returns image, video, or audio, or empty for a card. The
+// extension wins: WhatsApp's type strings describe the message, not the
+// file (a GIF is stored as .mp4; some videos are typed "type_54").
+func inlineMediaKind(message store.Message) string {
+	path := strings.TrimSpace(message.MediaPath)
+	if path == "" {
+		// No path (never downloaded): a card, not a certain 404.
+		return ""
 	}
-	return false
+	contentType := mediaContentTypes[strings.ToLower(filepath.Ext(path))]
+	if noBrowserDecoder[contentType] {
+		// Decided here, before the type-string fallback below, which would
+		// otherwise call it audio again.
+		return ""
+	}
+	if kind := mediaKindForContentType(contentType); kind != "" {
+		return kind
+	}
+	hint := strings.ToLower(message.MediaType + " " + message.MessageType)
+	switch {
+	case strings.Contains(hint, "sticker"):
+		return "image"
+	case strings.Contains(hint, "video"), strings.Contains(hint, "movie"), strings.Contains(hint, "gif"):
+		return "video"
+	case strings.Contains(hint, "audio"), strings.Contains(hint, "voice"), strings.Contains(hint, "ptt"):
+		return "audio"
+	case strings.Contains(hint, "image"), strings.Contains(hint, "photo"):
+		return "image"
+	}
+	return ""
+}
+
+// noBrowserDecoder lists formats no browser plays. Partly supported ones
+// (CAF, H.263 3GP in Safari) stay playable with an error fallback.
+// canPlayType isn't reliable: Chrome answers "" for video/quicktime but
+// plays .mov.
+var noBrowserDecoder = map[string]bool{
+	"audio/amr": true, // AMR-NB voice notes from older phones; dropped by every major browser
+}
+
+func mediaKindForContentType(contentType string) string {
+	switch {
+	case strings.HasPrefix(contentType, "image/"):
+		return "image"
+	case strings.HasPrefix(contentType, "video/"):
+		return "video"
+	case strings.HasPrefix(contentType, "audio/"):
+		return "audio"
+	}
+	return ""
 }
 
 func parseBefore(w http.ResponseWriter, r *http.Request) (*time.Time, int64, bool) {
@@ -540,9 +764,12 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
+// setSecurityHeaders: media-src allows 'self' but not blob:, since players
+// load signed URLs (images use blob URLs). Moving media to blobs needs
+// media-src widened, or playback fails with no console message.
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

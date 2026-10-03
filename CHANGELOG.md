@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Play video and voice notes in the web viewer, download attachments it cannot show, report unusable media directories at startup, and add `web --allow-cloud-media` for cloud-synced media.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.
