@@ -22,6 +22,8 @@
     backButton: document.querySelector("#back-button"),
     chatAvatar: document.querySelector("#chat-avatar"),
     chatFlag: document.querySelector("#chat-flag"),
+    jumpDate: document.querySelector("#jump-date"),
+    jumpDateLabel: document.querySelector("#jump-date-label"),
     chatIntro: document.querySelector("#chat-intro"),
     chatList: document.querySelector("#chat-list"),
     chatSubtitle: document.querySelector("#chat-subtitle"),
@@ -54,6 +56,11 @@
     filter: "all",
     listRendered: false,
     messages: [],
+    // Whether the loaded window reaches the chat's newest and oldest messages.
+    atNewest: true,
+    atOldest: false,
+    // Set by a jump: keep the picked date in the field until the reader scrolls.
+    jumpDateHeld: false,
     seenMessageIds: new Set(),
     selectedChat: null,
     searching: false,
@@ -918,12 +925,15 @@
     resetImageObserver();
     elements.messageList.replaceChildren();
 
-    if (chat && state.messages.length < (chat.message_count || 0)) {
+    if (chat && !state.atOldest && state.messages.length < (chat.message_count || 0)) {
       const older = document.createElement("button");
       older.type = "button";
       older.className = "load-older";
       older.id = "load-older";
-      older.textContent = `Load older messages (${formatCount(chat.message_count - state.messages.length)} more)`;
+      // After a jump, unloaded messages lie both before and after the window.
+      older.textContent = state.atNewest
+        ? `Load older messages (${formatCount(chat.message_count - state.messages.length)} more)`
+        : "Load older messages";
       older.addEventListener("click", loadOlder);
       elements.messageList.append(older);
     }
@@ -948,6 +958,7 @@
       if (!group || !prevDate !== !date || (date && prevDate && !sameDay(date, prevDate))) {
         group = document.createElement("div");
         group.className = "day-group";
+        if (date) group.dataset.date = localDateValue(date);
         const chipEl = document.createElement("div");
         chipEl.className = "day-chip";
         chipEl.textContent = formatDayLabel(date);
@@ -972,6 +983,18 @@
       group.append(bubbleRow(message, runFirst, isGroupChat));
       prevMessage = message;
     }
+
+    if (chat && !state.atNewest) {
+      const newer = document.createElement("button");
+      newer.type = "button";
+      newer.className = "load-older load-newer";
+      newer.id = "load-newer";
+      newer.textContent = "Load newer messages";
+      newer.addEventListener("click", loadNewer);
+      elements.messageList.append(newer);
+    }
+    // A view that fits without scrolling never fires scroll.
+    queueJumpDateSync();
   }
 
   // ---------- Views ----------
@@ -1012,6 +1035,12 @@
     elements.chatSubtitle.textContent = parts.join(" · ");
     elements.chatFlag.hidden = !chat.archived;
     elements.chatFlag.textContent = "archived";
+    const first = parseDate(chat.first_message_at);
+    const last = parseDate(chat.last_message_at);
+    elements.jumpDateLabel.hidden = !first;
+    elements.jumpDate.value = "";
+    elements.jumpDate.min = first ? localDateValue(first) : "";
+    elements.jumpDate.max = localDateValue(last || new Date());
     document.title = `${chatName(chat)} — wacrawl`;
   }
 
@@ -1026,6 +1055,7 @@
       ? "Searching message text, chats, senders, and media titles…"
       : `${formatCount(count)} match${count === 1 ? "" : "es"} across the archive`;
     elements.chatFlag.hidden = true;
+    elements.jumpDateLabel.hidden = true;
     document.title = `Search: ${query} — wacrawl`;
   }
 
@@ -1036,6 +1066,9 @@
     state.selectedChat = chat;
     state.messages = [];
     state.seenMessageIds = new Set();
+    state.atNewest = true;
+    state.atOldest = false;
+    state.jumpDateHeld = false;
     const searchChangesSidebar = elements.searchInput.value !== "" && (!keepSearchText || leavingMessageSearch);
     if (!keepSearchText) {
       elements.searchInput.value = "";
@@ -1054,12 +1087,129 @@
       if (request !== state.viewRequest) return;
       state.messages = messages;
       state.seenMessageIds = new Set(messages.map(messageKey));
+      state.atOldest = messages.length < FETCH_LIMIT;
       renderMessages();
       elements.messageScroll.scrollTop = elements.messageScroll.scrollHeight;
     } catch (error) {
       if (request !== state.viewRequest) return;
       showToast(error.message);
       state.messages = [];
+      renderMessages();
+    }
+  }
+
+  // Compared to the second, the precision the archive stores.
+  function startsChat(chat, message) {
+    const first = parseDate(chat?.first_message_at);
+    const at = parseDate(message?.timestamp);
+    return Boolean(first && at && Math.floor(at.getTime() / 1000) <= Math.floor(first.getTime() / 1000));
+  }
+
+  // A pasted year-first date (2024-08-11, 2024/8/11, 2024.08.11) as
+  // YYYY-MM-DD, or "" if it is not one.
+  function pastedDateValue(text) {
+    const match = text.trim().match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+    if (!match) return "";
+    const [year, month, day] = match.slice(1).map(Number);
+    const date = new Date(year, month - 1, day);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return "";
+    return localDateValue(date);
+  }
+
+  function localDateValue(date) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+
+  async function jumpToDate(value) {
+    const chat = state.selectedChat;
+    const [year, month, day] = (value || "").split("-").map(Number);
+    if (!chat || !year || !month || !day) return;
+    const startOfDay = new Date(year, month - 1, day);
+    const after = Math.floor(startOfDay.getTime() / 1000);
+    const request = ++state.viewRequest;
+    resetMediaCache();
+    renderLoading("Finding that date…");
+    try {
+      const messages = await api(`/api/messages?chat=${encodeURIComponent(chat.jid)}&limit=${FETCH_LIMIT}&after=${after}`);
+      if (request !== state.viewRequest) return;
+      if (!messages.length) {
+        showToast("No messages on or after that date; showing the latest.");
+        await selectChat(chat, true);
+        return;
+      }
+      // An empty day also shows the message before it, so the gap is visible.
+      let shown = messages;
+      if (!sameDay(parseDate(messages[0].timestamp) || new Date(0), startOfDay) && after > 1) {
+        const previous = await api(`/api/messages?chat=${encodeURIComponent(chat.jid)}&limit=1&before=${after - 1}`);
+        if (request !== state.viewRequest) return;
+        shown = previous.concat(messages);
+      }
+      state.messages = shown;
+      state.seenMessageIds = new Set(shown.map(messageKey));
+      state.atNewest = messages.length < FETCH_LIMIT;
+      state.atOldest = startsChat(chat, shown[0]);
+      state.jumpDateHeld = true;
+      elements.jumpDate.value = value;
+      renderMessages();
+      const first = elements.messageList.querySelector(".day-group");
+      if (first) elements.messageScroll.scrollTop = first.offsetTop - elements.messageScroll.offsetTop;
+      else elements.messageScroll.scrollTop = 0;
+    } catch (error) {
+      if (request !== state.viewRequest) return;
+      showToast(error.message);
+      renderMessages();
+    }
+  }
+
+  // Left alone while focused, so it never overwrites a date being typed.
+  let jumpSyncQueued = false;
+  function syncJumpDateToView() {
+    jumpSyncQueued = false;
+    if (state.jumpDateHeld || elements.jumpDateLabel.hidden || document.activeElement === elements.jumpDate) return;
+    const top = elements.messageScroll.getBoundingClientRect().top;
+    for (const group of elements.messageList.querySelectorAll(".day-group[data-date]")) {
+      if (group.getBoundingClientRect().bottom > top + 8) {
+        elements.jumpDate.value = group.dataset.date;
+        return;
+      }
+    }
+  }
+  function queueJumpDateSync() {
+    if (jumpSyncQueued) return;
+    jumpSyncQueued = true;
+    requestAnimationFrame(syncJumpDateToView);
+  }
+
+  async function loadNewer() {
+    const chat = state.selectedChat;
+    if (!chat || !state.messages.length) return;
+    const button = document.querySelector("#load-newer");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Loading…";
+    }
+    const request = state.viewRequest;
+    const newestMessage = state.messages[state.messages.length - 1];
+    const newest = parseDate(newestMessage.timestamp);
+    const after = newest ? Math.floor(newest.getTime() / 1000) : 0;
+    const cursorPK = Number(newestMessage.source_pk || 0);
+    const cursor = cursorPK > 0 ? `&after=${after}&after_pk=${cursorPK}` : `&after=${after}`;
+    try {
+      const newer = await api(`/api/messages?chat=${encodeURIComponent(chat.jid)}&limit=${FETCH_LIMIT}${cursor}`);
+      if (request !== state.viewRequest) return;
+      const fresh = newer.filter((m) => !state.seenMessageIds.has(messageKey(m)));
+      fresh.forEach((m) => state.seenMessageIds.add(messageKey(m)));
+      state.messages = state.messages.concat(fresh);
+      state.atNewest = newer.length < FETCH_LIMIT || !fresh.length;
+      if (state.atNewest) showToast("You have reached the latest message.");
+      const scroller = elements.messageScroll;
+      const previousTop = scroller.scrollTop;
+      renderMessages();
+      scroller.scrollTop = previousTop;
+    } catch (error) {
+      if (request !== state.viewRequest) return;
+      showToast(error.message);
       renderMessages();
     }
   }
@@ -1084,12 +1234,14 @@
       if (request !== state.viewRequest) return;
       const fresh = older.filter((m) => !state.seenMessageIds.has(messageKey(m)));
       if (!fresh.length) {
+        state.atOldest = true;
         showToast("You have reached the beginning of this archive.");
         if (button) button.remove();
         return;
       }
       fresh.forEach((m) => state.seenMessageIds.add(messageKey(m)));
       state.messages = fresh.concat(state.messages);
+      state.atOldest = older.length < FETCH_LIMIT || startsChat(chat, fresh[0]);
       const scroller = elements.messageScroll;
       const previousHeight = scroller.scrollHeight;
       const previousTop = scroller.scrollTop;
@@ -1206,6 +1358,112 @@
   }
 
   // ---------- Events ----------
+
+  // A date input fires on every keystroke that forms a valid date, so typing
+  // "20" would jump to the 2nd, then the 20th. Completing the day jumps at
+  // once; other edits wait for the day, Enter, blur, or a pause.
+  const JUMP_TYPING_GRACE_MS = 1100;
+  const JUMP_EDIT_PAUSE_MS = 2500;
+  const jumpTyping = { lastKeyAt: 0, previous: "", pending: 0 };
+  // Segment order as the date input shows it, which follows the locale.
+  const JUMP_SEGMENT_ORDER = (() => {
+    try {
+      const order = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "2-digit", day: "2-digit" })
+        .formatToParts(new Date(2001, 1, 3))
+        .map((part) => part.type)
+        .filter((type) => type === "year" || type === "month" || type === "day");
+      if (order.length === 3) return order;
+    } catch {
+      // Fall through to the most common order.
+    }
+    return ["month", "day", "year"];
+  })();
+
+  // With no earlier value the date just became complete, so the last
+  // segment was typed.
+  function typedDateSegment(previous, next) {
+    if (!previous) return JUMP_SEGMENT_ORDER[2];
+    const [py, pm] = previous.split("-");
+    const [ny, nm] = next.split("-");
+    if (py !== ny) return "year";
+    if (pm !== nm) return "month";
+    return "day";
+  }
+
+  function segmentTakesAnotherDigit(segment, value) {
+    const [year, month, day] = value.split("-").map(Number);
+    if (segment === "year") return year < 1000;
+    if (segment === "month") return month === 1;
+    return day <= 3;
+  }
+
+  function commitJumpDate() {
+    clearTimeout(jumpTyping.pending);
+    jumpTyping.pending = 0;
+    if (!elements.jumpDate.value) return;
+    jumpTyping.previous = elements.jumpDate.value;
+    jumpToDate(elements.jumpDate.value);
+  }
+
+  elements.jumpDate.addEventListener("focus", () => {
+    jumpTyping.previous = elements.jumpDate.value;
+  });
+  elements.jumpDate.addEventListener("blur", () => {
+    if (jumpTyping.pending) commitJumpDate();
+  });
+  elements.jumpDate.addEventListener("keydown", (event) => {
+    jumpTyping.lastKeyAt = performance.now();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitJumpDate();
+    } else if (event.key === "Tab") {
+      // Tab moves between segments in some browsers; blur ends the edit.
+    } else {
+      // Another keystroke may extend the segment; wait for its result.
+      clearTimeout(jumpTyping.pending);
+      jumpTyping.pending = 0;
+    }
+  });
+  elements.jumpDate.addEventListener("change", () => {
+    const value = elements.jumpDate.value;
+    clearTimeout(jumpTyping.pending);
+    jumpTyping.pending = 0;
+    // Mid-edit values can be invalid (the "0" of "03") and read as empty.
+    // Keep the previous date so the next keystroke is still a segment edit.
+    if (!value) return;
+    const typed = performance.now() - jumpTyping.lastKeyAt < 400;
+    if (!typed) {
+      commitJumpDate();
+      return;
+    }
+    const freshEntry = !jumpTyping.previous;
+    const segment = typedDateSegment(jumpTyping.previous, value);
+    jumpTyping.previous = value;
+    if (!freshEntry && segment !== "day") {
+      // Year or month edited: the reader is probably heading for the day.
+      jumpTyping.pending = setTimeout(commitJumpDate, JUMP_EDIT_PAUSE_MS);
+    } else if (segmentTakesAnotherDigit(segment, value)) {
+      jumpTyping.pending = setTimeout(commitJumpDate, JUMP_TYPING_GRACE_MS);
+    } else {
+      commitJumpDate();
+    }
+  });
+  elements.jumpDate.addEventListener("paste", (event) => {
+    const value = pastedDateValue(event.clipboardData?.getData("text") || "");
+    if (!value) return;
+    event.preventDefault();
+    elements.jumpDate.value = value;
+    commitJumpDate();
+  });
+  elements.messageScroll.addEventListener("scroll", queueJumpDateSync, { passive: true });
+  // Programmatic scrolls fire scroll too, so only direct input releases a held date.
+  for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+    elements.messageScroll.addEventListener(type, () => {
+      if (!state.jumpDateHeld) return;
+      state.jumpDateHeld = false;
+      queueJumpDateSync();
+    }, { passive: true });
+  }
 
   elements.searchForm.addEventListener("submit", (event) => {
     event.preventDefault();

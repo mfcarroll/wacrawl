@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a "Jump to" date picker to the web viewer's chat header; `/api/messages` accepts `after` and `after_pk` to page forward.
+
 ## 0.4.2 - 2026-10-01
 
 **Highlights:** Make legacy archive adoption scale without repeated full-history scans, retaining existing messages and event identities.

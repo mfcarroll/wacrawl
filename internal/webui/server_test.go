@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -135,6 +136,84 @@ func TestHandlerMessagesBeforePagination(t *testing.T) {
 	response = request(t, handler, "/api/messages?chat=123%40g.us&before_pk=3", testToken)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("before_pk without before status=%d", response.Code)
+	}
+}
+
+func TestHandlerChatsReportFirstMessageDate(t *testing.T) {
+	handler := testHandler(t)
+	response := request(t, handler, "/api/chats?limit=10", testToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("chats status=%d", response.Code)
+	}
+	var chats []map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &chats); err != nil {
+		t.Fatal(err)
+	}
+	for _, chat := range chats {
+		if chat["jid"] != "123@g.us" {
+			continue
+		}
+		// m1 and m3 are a minute older than m2, the newest.
+		first, _ := time.Parse(time.RFC3339, fmt.Sprint(chat["first_message_at"]))
+		last, _ := time.Parse(time.RFC3339, fmt.Sprint(chat["last_message_at"]))
+		if first.IsZero() || last.Sub(first) != time.Minute {
+			t.Fatalf("first_message_at=%v last_message_at=%v, want one minute apart", chat["first_message_at"], chat["last_message_at"])
+		}
+		return
+	}
+	t.Fatal("chat 123@g.us missing from /api/chats")
+}
+
+func TestHandlerMessagesAfterPagination(t *testing.T) {
+	handler := testHandler(t)
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	ids := func(t *testing.T, path string) []any {
+		t.Helper()
+		page := request(t, handler, path, testToken)
+		if page.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, page.Code, page.Body.String())
+		}
+		var messages []map[string]any
+		if err := json.Unmarshal(page.Body.Bytes(), &messages); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]any, 0, len(messages))
+		for _, message := range messages {
+			out = append(out, message["message_id"])
+		}
+		return out
+	}
+
+	// Jumping to a point in time pages forward, oldest first: m1 and m3 share
+	// a second, then m2 is the newest.
+	start := strconv.FormatInt(base.Add(-2*time.Minute).Unix(), 10)
+	if got := ids(t, "/api/messages?chat=123%40g.us&limit=10&after="+start); fmt.Sprint(got) != "[m1 m3 m2]" {
+		t.Fatalf("after page = %v, want [m1 m3 m2]", got)
+	}
+	// The limit keeps the oldest rows of the window, not the newest.
+	if got := ids(t, "/api/messages?chat=123%40g.us&limit=1&after="+start); fmt.Sprint(got) != "[m1]" {
+		t.Fatalf("limited after page = %v, want [m1]", got)
+	}
+
+	// The composite cursor advances within the shared second.
+	sameSecond := strconv.FormatInt(base.Add(-time.Minute).Unix(), 10)
+	if got := ids(t, "/api/messages?chat=123%40g.us&limit=10&after="+sameSecond+"&after_pk=1"); fmt.Sprint(got) != "[m3 m2]" {
+		t.Fatalf("after_pk=1 page = %v, want [m3 m2]", got)
+	}
+	if got := ids(t, "/api/messages?chat=123%40g.us&limit=10&after="+sameSecond+"&after_pk=3"); fmt.Sprint(got) != "[m2]" {
+		t.Fatalf("after_pk=3 page = %v, want [m2]", got)
+	}
+
+	for _, path := range []string{
+		"/api/messages?chat=123%40g.us&after=abc",
+		"/api/messages?chat=123%40g.us&after=0",
+		"/api/messages?chat=123%40g.us&after_pk=3",
+		"/api/messages?chat=123%40g.us&after=" + start + "&after_pk=0",
+		"/api/messages?chat=123%40g.us&after=" + start + "&before=" + sameSecond,
+	} {
+		if code := request(t, handler, path, testToken).Code; code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d, want 400", path, code)
+		}
 	}
 }
 

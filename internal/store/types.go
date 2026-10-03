@@ -77,6 +77,8 @@ type Chat struct {
 	Hidden         bool
 	RawSessionType int
 	MessageCount   int
+	// FirstMessageAt is zero when the chat has no valid timestamp.
+	FirstMessageAt time.Time
 }
 
 type ChatFilter struct {
@@ -173,7 +175,9 @@ type MessageFilter struct {
 	// ts < Before, or ts == Before with source_pk < BeforePK. Without it,
 	// paging by timestamp alone can stall when a page boundary lands inside
 	// a run of messages that share the same second.
-	BeforePK       int64
+	BeforePK int64
+	// AfterPK breaks ties at ts == After, as BeforePK does for Before.
+	AfterPK        int64
 	FromMe         *bool
 	HasMedia       bool
 	Asc            bool

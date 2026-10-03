@@ -73,6 +73,8 @@ type chatResponse struct {
 	UnreadCount   int       `json:"unread_count"`
 	Archived      bool      `json:"archived"`
 	MessageCount  int       `json:"message_count"`
+	// Bounds the "Jump to" picker.
+	FirstMessageAt time.Time `json:"first_message_at,omitzero"`
 }
 
 type messageResponse struct {
@@ -291,13 +293,14 @@ func (h *handler) serveChats(w http.ResponseWriter, r *http.Request) {
 	out := make([]chatResponse, 0, len(chats))
 	for _, chat := range chats {
 		out = append(out, chatResponse{
-			JID:           chat.JID,
-			Kind:          chat.Kind,
-			Name:          chat.Name,
-			LastMessageAt: chat.LastMessageAt,
-			UnreadCount:   chat.UnreadCount,
-			Archived:      chat.Archived,
-			MessageCount:  chat.MessageCount,
+			JID:            chat.JID,
+			Kind:           chat.Kind,
+			Name:           chat.Name,
+			LastMessageAt:  chat.LastMessageAt,
+			UnreadCount:    chat.UnreadCount,
+			Archived:       chat.Archived,
+			MessageCount:   chat.MessageCount,
+			FirstMessageAt: chat.FirstMessageAt,
 		})
 	}
 	writeJSON(w, out)
@@ -308,22 +311,37 @@ func (h *handler) serveMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	before, beforePK, ok := parseBefore(w, r)
+	before, beforePK, ok := parseCursor(w, r, "before")
 	if !ok {
 		return
 	}
+	after, afterPK, ok := parseCursor(w, r, "after")
+	if !ok {
+		return
+	}
+	if before != nil && after != nil {
+		http.Error(w, "before and after are mutually exclusive", http.StatusBadRequest)
+		return
+	}
+	// With after, pages forward and returns oldest first; otherwise pages back
+	// from the newest and is reversed.
 	messages, err := h.store.Messages(r.Context(), store.MessageFilter{
 		ChatJID:  strings.TrimSpace(r.URL.Query().Get("chat")),
 		Limit:    limit,
 		Before:   before,
 		BeforePK: beforePK,
+		After:    after,
+		AfterPK:  afterPK,
+		Asc:      after != nil,
 	})
 	if err != nil {
 		writeArchiveError(w)
 		return
 	}
-	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
-		messages[left], messages[right] = messages[right], messages[left]
+	if after == nil {
+		for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
+			messages[left], messages[right] = messages[right], messages[left]
+		}
 	}
 	writeJSON(w, messagesForWeb(messages))
 }
@@ -492,31 +510,32 @@ func inlineImageMessage(message store.Message) bool {
 	return false
 }
 
-func parseBefore(w http.ResponseWriter, r *http.Request) (*time.Time, int64, bool) {
-	raw := strings.TrimSpace(r.URL.Query().Get("before"))
-	rawPK := strings.TrimSpace(r.URL.Query().Get("before_pk"))
+// parseCursor reads name (unix seconds) and an optional name_pk tie-breaker.
+func parseCursor(w http.ResponseWriter, r *http.Request, name string) (*time.Time, int64, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	rawPK := strings.TrimSpace(r.URL.Query().Get(name + "_pk"))
 	if raw == "" {
 		if rawPK != "" {
-			http.Error(w, "before_pk requires before", http.StatusBadRequest)
+			http.Error(w, name+"_pk requires "+name, http.StatusBadRequest)
 			return nil, 0, false
 		}
 		return nil, 0, true
 	}
 	seconds, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || seconds <= 0 {
-		http.Error(w, "before must be a positive unix timestamp", http.StatusBadRequest)
+		http.Error(w, name+" must be a positive unix timestamp", http.StatusBadRequest)
 		return nil, 0, false
 	}
-	var beforePK int64
+	var pk int64
 	if rawPK != "" {
-		beforePK, err = strconv.ParseInt(rawPK, 10, 64)
-		if err != nil || beforePK <= 0 {
-			http.Error(w, "before_pk must be a positive integer", http.StatusBadRequest)
+		pk, err = strconv.ParseInt(rawPK, 10, 64)
+		if err != nil || pk <= 0 {
+			http.Error(w, name+"_pk must be a positive integer", http.StatusBadRequest)
 			return nil, 0, false
 		}
 	}
-	before := time.Unix(seconds, 0).UTC()
-	return &before, beforePK, true
+	at := time.Unix(seconds, 0).UTC()
+	return &at, pk, true
 }
 
 func parseLimit(w http.ResponseWriter, r *http.Request, fallback int) (int, bool) {

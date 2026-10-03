@@ -43,7 +43,8 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	count(m.rowid) as message_count,
+	cast(coalesce(min(case when m.ts > 0 and m.ts <= 253402300799 then m.ts end), 0) as integer) as first_message_at
 from chats c
 left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null
@@ -62,7 +63,8 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	count(m.rowid) as message_count,
+	cast(coalesce(min(case when m.ts > 0 and m.ts <= 253402300799 then m.ts end), 0) as integer) as first_message_at
 from chats c
 left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null and c.unread_count > 0

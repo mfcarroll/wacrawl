@@ -1173,3 +1173,23 @@ html[data-theme="auto"].prefers-dark .media-card { background: rgba(11, 20, 26, 
   .message-list { padding: 12px 4% 16px; }
   .chat-header { border-left: 0; }
 }
+
+.jump-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12.5px;
+  color: var(--accent-deep);
+}
+
+.jump-date input {
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--chip-bg);
+  background: var(--chip-bg);
+  color: inherit;
+  font: inherit;
+}
+
+.load-newer { margin: 10px 0 4px; }

@@ -261,8 +261,13 @@ func applyMessageFilters(query string, args []any, filter MessageFilter, joined 
 		query += " and " + validUnixPredicate(prefix+"ts")
 	}
 	if filter.After != nil {
-		query += " and " + prefix + "ts >= ?"
-		args = append(args, unix(*filter.After))
+		if filter.AfterPK > 0 {
+			query += " and (" + prefix + "ts > ? or (" + prefix + "ts = ? and " + prefix + "source_pk > ?))"
+			args = append(args, unix(*filter.After), unix(*filter.After), filter.AfterPK)
+		} else {
+			query += " and " + prefix + "ts >= ?"
+			args = append(args, unix(*filter.After))
+		}
 	}
 	if filter.Before != nil {
 		if filter.BeforePK > 0 {
@@ -351,5 +356,6 @@ func chatFromRow(row storedb.ListChatsRow) Chat {
 		Hidden:         row.Hidden != 0,
 		RawSessionType: int(row.RawSessionType),
 		MessageCount:   int(row.MessageCount),
+		FirstMessageAt: fromUnix(row.FirstMessageAt),
 	}
 }

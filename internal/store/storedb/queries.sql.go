@@ -679,7 +679,8 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	count(m.rowid) as message_count,
+	cast(coalesce(min(case when m.ts > 0 and m.ts <= 253402300799 then m.ts end), 0) as integer) as first_message_at
 from chats c
 left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null
@@ -699,6 +700,7 @@ type ListChatsRow struct {
 	Hidden         int64
 	RawSessionType int64
 	MessageCount   int64
+	FirstMessageAt int64
 }
 
 func (q *Queries) ListChats(ctx context.Context, limit int64) ([]ListChatsRow, error) {
@@ -721,6 +723,7 @@ func (q *Queries) ListChats(ctx context.Context, limit int64) ([]ListChatsRow, e
 			&i.Hidden,
 			&i.RawSessionType,
 			&i.MessageCount,
+			&i.FirstMessageAt,
 		); err != nil {
 			return nil, err
 		}
@@ -746,7 +749,8 @@ select
 	c.removed,
 	c.hidden,
 	c.raw_session_type,
-	count(m.rowid) as message_count
+	count(m.rowid) as message_count,
+	cast(coalesce(min(case when m.ts > 0 and m.ts <= 253402300799 then m.ts end), 0) as integer) as first_message_at
 from chats c
 left join messages m on m.chat_jid = c.jid and m.deleted_at is null
 where c.deleted_at is null and c.unread_count > 0
@@ -766,6 +770,7 @@ type ListUnreadChatsRow struct {
 	Hidden         int64
 	RawSessionType int64
 	MessageCount   int64
+	FirstMessageAt int64
 }
 
 func (q *Queries) ListUnreadChats(ctx context.Context, limit int64) ([]ListUnreadChatsRow, error) {
@@ -788,6 +793,7 @@ func (q *Queries) ListUnreadChats(ctx context.Context, limit int64) ([]ListUnrea
 			&i.Hidden,
 			&i.RawSessionType,
 			&i.MessageCount,
+			&i.FirstMessageAt,
 		); err != nil {
 			return nil, err
 		}
