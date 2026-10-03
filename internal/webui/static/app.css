@@ -1194,3 +1194,22 @@ html[data-theme="auto"].prefers-dark .media-card { background: rgba(11, 20, 26, 
   .message-list { padding: 12px 4% 16px; }
   .chat-header { border-left: 0; }
 }
+
+.media-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--chip-bg);
+  color: var(--accent-deep);
+  box-shadow: var(--shadow-1);
+  transition: transform 0.12s ease;
+}
+
+.media-download svg { width: 18px; height: 18px; fill: currentColor; }
+.media-download:hover { transform: translateY(-1px); }
+.media-download:focus-visible { outline: 2px solid var(--accent-deep); outline-offset: 2px; }

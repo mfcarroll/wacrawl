@@ -13,10 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +120,10 @@ type messageResponse struct {
 	// media_url: store.Message.MediaURL is WhatsApp's CDN address, which must
 	// never leave this process.
 	MediaSrc string `json:"media_src,omitempty"`
+	// MediaDownload is a signed link that saves the file (serveDownload).
+	MediaDownload string `json:"media_download,omitempty"`
+	// MediaFormat is a document's type from its extension ("PDF"), or empty.
+	MediaFormat string `json:"media_format,omitempty"`
 }
 
 func Serve(ctx context.Context, archive *store.Store, cfg Config) error {
@@ -288,8 +294,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Media is the one endpoint a signed URL can reach without the header, because
-	// <video> and <audio> cannot send one.
+	// <video>, <audio>, and download links can't send the header.
 	authorized := h.authorized(r) || h.signedMediaRequest(r, time.Now())
 	if !authorized {
 		w.Header().Set("WWW-Authenticate", "Bearer")
@@ -308,6 +313,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveSearch(w, r)
 	case "/api/media":
 		h.serveMedia(w, r)
+	case "/api/download":
+		h.serveDownload(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -354,7 +361,7 @@ func (h *handler) signedURL(purpose string, sourcePK int64, now time.Time) strin
 
 func (h *handler) signedMediaRequest(r *http.Request, now time.Time) bool {
 	purpose := strings.TrimPrefix(r.URL.Path, "/api/")
-	if purpose != "media" {
+	if purpose != "media" && purpose != "download" {
 		return false
 	}
 	query := r.URL.Query()
@@ -479,24 +486,34 @@ func (h *handler) messagesForWeb(messages []store.Message) []messageResponse {
 		if message.SourcePK > 0 && (kind == "video" || kind == "audio") {
 			mediaSrc = h.signedURL("media", message.SourcePK, now)
 		}
+		mediaDownload := ""
+		if message.SourcePK > 0 && strings.TrimSpace(message.MediaPath) != "" {
+			mediaDownload = h.signedURL("download", message.SourcePK, now)
+		}
+		mediaFormat := ""
+		if message.MediaType == "document" {
+			mediaFormat = strings.ToUpper(strings.TrimPrefix(fileExtension(strings.TrimSpace(message.MediaPath)), "."))
+		}
 		out = append(out, messageResponse{
-			SourcePK:    message.SourcePK,
-			ChatJID:     message.ChatJID,
-			ChatName:    message.ChatName,
-			MessageID:   message.MessageID,
-			SenderJID:   message.SenderJID,
-			SenderName:  message.SenderName,
-			Timestamp:   message.Timestamp,
-			FromMe:      message.FromMe,
-			Text:        message.Text,
-			MessageType: message.MessageType,
-			MediaType:   message.MediaType,
-			MediaTitle:  message.MediaTitle,
-			MediaSize:   message.MediaSize,
-			Starred:     message.Starred,
-			Snippet:     message.Snippet,
-			MediaKind:   kind,
-			MediaSrc:    mediaSrc,
+			SourcePK:      message.SourcePK,
+			ChatJID:       message.ChatJID,
+			ChatName:      message.ChatName,
+			MessageID:     message.MessageID,
+			SenderJID:     message.SenderJID,
+			SenderName:    message.SenderName,
+			Timestamp:     message.Timestamp,
+			FromMe:        message.FromMe,
+			Text:          message.Text,
+			MessageType:   message.MessageType,
+			MediaType:     message.MediaType,
+			MediaTitle:    message.MediaTitle,
+			MediaSize:     message.MediaSize,
+			Starred:       message.Starred,
+			Snippet:       message.Snippet,
+			MediaKind:     kind,
+			MediaSrc:      mediaSrc,
+			MediaDownload: mediaDownload,
+			MediaFormat:   mediaFormat,
 		})
 	}
 	return out
@@ -505,61 +522,26 @@ func (h *handler) messagesForWeb(messages []store.Message) []messageResponse {
 // serveMedia serves image, video, and audio bytes from the allowed roots,
 // never revealing the path.
 func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
-	raw := strings.TrimSpace(r.URL.Query().Get("pk"))
-	sourcePK, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || sourcePK <= 0 {
-		http.Error(w, "pk must be a positive integer", http.StatusBadRequest)
+	message, ok := h.requestedMessage(w, r)
+	if !ok {
 		return
 	}
-	message, err := h.store.MessageBySourcePK(r.Context(), sourcePK)
-	if errors.Is(err, sql.ErrNoRows) {
-		http.NotFound(w, r)
-		return
-	}
-	if err != nil {
-		writeArchiveError(w)
-		return
-	}
-	path := strings.TrimSpace(message.MediaPath)
-	kind := inlineMediaKind(message)
-	if path == "" || kind == "" {
+	if strings.TrimSpace(message.MediaPath) == "" || inlineMediaKind(message) == "" {
 		http.Error(w, "no inline preview", http.StatusNotFound)
 		return
 	}
-	root, path, ok := containedMediaPath(path, h.allowedMediaRoots)
+	file, info, path, ok := h.openArchivedMedia(w, message)
 	if !ok {
-		http.Error(w, "media unavailable", http.StatusNotFound)
-		return
-	}
-	open := openMediaFile
-	if h.allowCloudMedia {
-		open = openMediaFileBlocking
-	}
-	file, err := open(root, path)
-	if err != nil {
-		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
 	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
-		http.Error(w, "media unavailable", http.StatusNotFound)
-		return
-	}
-	// WhatsApp keeps stubs for media it has not downloaded; reading one blocks
-	// until macOS materializes it, which can wedge the request indefinitely.
-	// Cloud-synced archives want exactly that (AllowCloudMedia).
-	if !h.allowCloudMedia && !fileMaterialized(info) {
-		http.Error(w, "media not downloaded locally", http.StatusNotFound)
-		return
-	}
 	sniff := make([]byte, 512)
 	n, err := io.ReadFull(file, sniff)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		http.Error(w, "media unavailable", http.StatusNotFound)
 		return
 	}
-	contentType, ok := inlineContentType(path, sniff[:n])
+	contentType, ok := inlineContentType(path, sniff[:n], inlineMediaKind(message))
 	if !ok {
 		http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
 		return
@@ -572,6 +554,164 @@ func (h *handler) serveMedia(w http.ResponseWriter, r *http.Request) {
 	// ServeContent for range requests: seeking needs them, and Safari won't play
 	// without. It rewinds past the sniffed bytes.
 	http.ServeContent(w, r, "", info.ModTime(), file)
+}
+
+// requestedMessage writes the error response itself when it returns false.
+func (h *handler) requestedMessage(w http.ResponseWriter, r *http.Request) (store.Message, bool) {
+	sourcePK, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("pk")), 10, 64)
+	if err != nil || sourcePK <= 0 {
+		http.Error(w, "pk must be a positive integer", http.StatusBadRequest)
+		return store.Message{}, false
+	}
+	message, err := h.store.MessageBySourcePK(r.Context(), sourcePK)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return store.Message{}, false
+	}
+	if err != nil {
+		writeArchiveError(w)
+		return store.Message{}, false
+	}
+	return message, true
+}
+
+// openArchivedMedia writes the error response itself when it returns false.
+// The caller closes the file.
+func (h *handler) openArchivedMedia(w http.ResponseWriter, message store.Message) (*os.File, os.FileInfo, string, bool) {
+	root, path, ok := containedMediaPath(strings.TrimSpace(message.MediaPath), h.allowedMediaRoots)
+	if !ok {
+		http.Error(w, "media unavailable", http.StatusNotFound)
+		return nil, nil, "", false
+	}
+	open := openMediaFile
+	if h.allowCloudMedia {
+		open = openMediaFileBlocking
+	}
+	file, err := open(root, path)
+	if err != nil {
+		http.Error(w, "media unavailable", http.StatusNotFound)
+		return nil, nil, "", false
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+		_ = file.Close()
+		http.Error(w, "media unavailable", http.StatusNotFound)
+		return nil, nil, "", false
+	}
+	// WhatsApp keeps stubs for media it has not downloaded; reading one blocks
+	// until macOS materializes it, which can wedge the request indefinitely.
+	// Cloud-synced archives want exactly that (AllowCloudMedia).
+	if !h.allowCloudMedia && !fileMaterialized(info) {
+		_ = file.Close()
+		http.Error(w, "media not downloaded locally", http.StatusNotFound)
+		return nil, nil, "", false
+	}
+	return file, info, path, true
+}
+
+// serveDownload sends files as opaque downloads (generic type, nosniff,
+// attachment disposition, sandbox CSP): rendered on this origin, an HTML or
+// SVG file could script the page and read its token.
+func (h *handler) serveDownload(w http.ResponseWriter, r *http.Request) {
+	message, ok := h.requestedMessage(w, r)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(message.MediaPath) == "" {
+		http.Error(w, "no attachment", http.StatusNotFound)
+		return
+	}
+	file, info, path, ok := h.openArchivedMedia(w, message)
+	if !ok {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	filename := downloadFilename(message.MediaTitle, path)
+	if fileExtension(filename) == "" {
+		// Unnamed and no extension: sniff the head (ServeContent rewinds).
+		head := make([]byte, 512)
+		n, _ := io.ReadFull(file, head)
+		filename += sniffedExtension(head[:n], inlineMediaKind(message))
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	http.ServeContent(w, r, "", info.ModTime(), file)
+}
+
+// fileExtension is filepath.Ext limited to 1-8 letters or digits, so
+// "Report v1.2 final" has none.
+func fileExtension(name string) string {
+	if ext := filepath.Ext(name); plausibleExtension.MatchString(ext) {
+		return ext
+	}
+	return ""
+}
+
+var plausibleExtension = regexp.MustCompile(`^\.[A-Za-z0-9]{1,8}$`)
+
+// sniffedExtension names only unambiguous signatures. Not ZIP: .docx, .xlsx,
+// and .epub are ZIPs inside, and .zip would mislabel them.
+func sniffedExtension(head []byte, kind string) string {
+	// ISO base media says nothing about its stream; the message's kind does.
+	if isoBaseMedia(head) {
+		switch kind {
+		case "audio":
+			return ".m4a"
+		case "video":
+			return ".mp4"
+		}
+		return ""
+	}
+	switch http.DetectContentType(head) {
+	case "application/ogg":
+		return ".ogg"
+	case "application/pdf":
+		return ".pdf"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/wave":
+		return ".wav"
+	}
+	return ""
+}
+
+// whatsAppContentHash matches the base64 SHA-256 digest WhatsApp stores as the
+// title of attachments that have no name of their own.
+var whatsAppContentHash = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+
+// downloadFilename uses the title, else the stored name, without separators
+// or control characters, keeping the stored extension if the title has none.
+func downloadFilename(title, path string) string {
+	name := strings.TrimSpace(title)
+	if name == "" || whatsAppContentHash.MatchString(name) {
+		name = filepath.Base(path)
+	}
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '/' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+	if strings.Trim(name, ". _") == "" {
+		name = "attachment"
+	}
+	if fileExtension(name) == "" {
+		name += strings.ToLower(fileExtension(path))
+	}
+	if runes := []rune(name); len(runes) > 180 {
+		ext := fileExtension(name)
+		name = string(runes[:180-len([]rune(ext))]) + ext
+	}
+	return name
 }
 
 // Go's sniffer misses QuickTime, 3GP, CAF, and AMR, and calls an .m4a
@@ -607,7 +747,7 @@ var mediaContentTypes = map[string]string{
 // inlineContentType picks the type to serve, or refuses. The extension wins
 // for media, but the sniffer can veto (a PDF named .mp4). kind is the last
 // resort for a file without an extension.
-func inlineContentType(name string, sniff []byte) (string, bool) {
+func inlineContentType(name string, sniff []byte, kind string) (string, bool) {
 	sniffed := http.DetectContentType(sniff)
 	if !playableContentType(sniffed) && !inconclusiveSniff(sniffed) {
 		return "", false
@@ -615,10 +755,26 @@ func inlineContentType(name string, sniff []byte) (string, bool) {
 	if byExtension := mediaContentTypes[strings.ToLower(filepath.Ext(name))]; byExtension != "" {
 		return byExtension, true
 	}
+	// Voice notes are Ogg or MP4, which sniff as generic or video; only the
+	// message says audio.
+	if kind == "audio" {
+		switch {
+		case sniffed == "application/ogg":
+			return "audio/ogg", true
+		case isoBaseMedia(sniff):
+			return "audio/mp4", true
+		}
+	}
 	if playableContentType(sniffed) {
 		return sniffed, true
 	}
 	return "", false
+}
+
+// isoBaseMedia reports whether the bytes open an ISO base media file (MP4,
+// M4A, QuickTime), whose first box is "ftyp" at offset 4.
+func isoBaseMedia(head []byte) bool {
+	return len(head) >= 12 && string(head[4:8]) == "ftyp"
 }
 
 func playableContentType(contentType string) bool {

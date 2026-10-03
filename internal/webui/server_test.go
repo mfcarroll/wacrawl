@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +137,188 @@ func TestHandlerMessagesBeforePagination(t *testing.T) {
 	response = request(t, handler, "/api/messages?chat=123%40g.us&before_pk=3", testToken)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("before_pk without before status=%d", response.Code)
+	}
+}
+
+func TestHandlerServesDownloads(t *testing.T) {
+	ctx := context.Background()
+	archive, err := store.Open(ctx, filepath.Join(t.TempDir(), "downloads.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = archive.Close() })
+	dir := filepath.Join(filepath.Dir(archive.Path()), "media")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path string, body []byte) []byte {
+		t.Helper()
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	pdfBytes := write(filepath.Join(dir, "3f1c.pdf"), []byte("%PDF-1.4 fixture"))
+	// Stored with no extension, as WhatsApp sometimes does.
+	barePDF := write(filepath.Join(dir, "91007223"), []byte("%PDF-1.7 no extension anywhere"))
+	bareDocx := write(filepath.Join(dir, "a1b2c3d4"), []byte("PK\x03\x04 docx is a zip inside"))
+	htmlBytes := write(filepath.Join(dir, "page.html"), []byte("<script>fetch('/api/status')</script>"))
+	amrBytes := write(filepath.Join(dir, "voice.amr"), []byte("#!AMR\nfixture"))
+	imagePath := filepath.Join(dir, "photo.png")
+	writeTestPNG(t, imagePath)
+	outside := filepath.Join(t.TempDir(), "outside.pdf")
+	write(outside, []byte("%PDF-1.4 outside"))
+
+	const jid = "777@s.whatsapp.net"
+	hashTitle := strings.Repeat("A", 43) + "="
+	now := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+	err = archive.ReplaceAll(ctx, store.ImportStats{FinishedAt: now}, nil, []store.Chat{
+		{JID: jid, Kind: "dm", Name: "Download Tester", LastMessageAt: now},
+	}, nil, nil, []store.Message{
+		{SourcePK: 1, ChatJID: jid, MessageID: "d1", Timestamp: now, MediaType: "document", MediaTitle: "Tax return 2024", MediaPath: filepath.Join(dir, "3f1c.pdf")},
+		{SourcePK: 2, ChatJID: jid, MessageID: "d2", Timestamp: now, MediaType: "document", MediaTitle: hashTitle, MediaPath: filepath.Join(dir, "page.html")},
+		{SourcePK: 3, ChatJID: jid, MessageID: "d3", Timestamp: now, MediaType: "audio", MediaPath: filepath.Join(dir, "voice.amr")},
+		{SourcePK: 4, ChatJID: jid, MessageID: "d4", Timestamp: now, MediaType: "image", MediaPath: imagePath},
+		{SourcePK: 5, ChatJID: jid, MessageID: "d5", Timestamp: now, MediaType: "document", MediaPath: outside},
+		{SourcePK: 6, ChatJID: jid, MessageID: "d6", Timestamp: now, MediaType: "document"},
+		{SourcePK: 7, ChatJID: jid, MessageID: "d7", Timestamp: now, MediaType: "document", MediaTitle: "Meeting Notes", MediaPath: filepath.Join(dir, "91007223")},
+		{SourcePK: 8, ChatJID: jid, MessageID: "d8", Timestamp: now, MediaType: "document", MediaTitle: "Script", MediaPath: filepath.Join(dir, "a1b2c3d4")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(archive, testToken, testHost, "")
+	t.Cleanup(handler.close)
+
+	page := request(t, handler, "/api/messages?chat=777%40s.whatsapp.net&limit=10", testToken)
+	var messages []map[string]any
+	if err := json.Unmarshal(page.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{}
+	formats := map[string]string{}
+	for _, message := range messages {
+		link, _ := message["media_download"].(string)
+		links[fmt.Sprint(message["message_id"])] = link
+		format, _ := message["media_format"].(string)
+		formats[fmt.Sprint(message["message_id"])] = format
+	}
+	// Documents name their type from the stored extension; others don't.
+	for id, want := range map[string]string{"d1": "PDF", "d2": "HTML", "d3": "", "d4": "", "d7": "", "d6": ""} {
+		if formats[id] != want {
+			t.Fatalf("%s media_format=%q, want %q", id, formats[id], want)
+		}
+	}
+	// Every attachment with a file gets a link, including inline ones, whose
+	// card fallback offers it if the browser fails to show them.
+	for id, want := range map[string]bool{"d1": true, "d2": true, "d3": true, "d4": true, "d5": true, "d6": false, "d7": true, "d8": true} {
+		if (links[id] != "") != want {
+			t.Fatalf("%s media_download=%q, want present=%v", id, links[id], want)
+		}
+	}
+
+	get := func(url, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(t, handler, url, token)
+	}
+	for _, tc := range []struct {
+		id, filename string
+		body         []byte
+	}{
+		{"d1", "Tax return 2024.pdf", pdfBytes}, // title kept, extension added
+		{"d2", "page.html", htmlBytes},          // hash title replaced by the file's name
+		{"d3", "voice.amr", amrBytes},
+		{"d7", "Meeting Notes.pdf", barePDF}, // no extension anywhere: taken from the bytes
+		{"d8", "Script", bareDocx},           // a ZIP container is not guessed at
+	} {
+		response := get(links[tc.id], "") // signed link alone, no bearer header
+		if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), tc.body) {
+			t.Fatalf("%s download status=%d bytes=%d want %d", tc.id, response.Code, response.Body.Len(), len(tc.body))
+		}
+		// Never rendered: opaque type, no sniffing, attachment, sandboxed.
+		if got := response.Header().Get("Content-Type"); got != "application/octet-stream" {
+			t.Fatalf("%s content-type=%q", tc.id, got)
+		}
+		if got := response.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("%s nosniff=%q", tc.id, got)
+		}
+		if got := response.Header().Get("Content-Security-Policy"); !strings.HasPrefix(got, "sandbox") {
+			t.Fatalf("%s csp=%q", tc.id, got)
+		}
+		disposition, params, err := mime.ParseMediaType(response.Header().Get("Content-Disposition"))
+		if err != nil || disposition != "attachment" || params["filename"] != tc.filename {
+			t.Fatalf("%s disposition=%q params=%v err=%v, want attachment %q", tc.id, disposition, params, err, tc.filename)
+		}
+	}
+
+	// A signed link is scoped to its endpoint in both directions.
+	if code := get(strings.Replace(links["d1"], "/api/download", "/api/media", 1), "").Code; code != http.StatusUnauthorized {
+		t.Fatalf("download signature on /api/media status=%d, want 401", code)
+	}
+	mediaLink := handler.signedURL("media", 1, time.Now())
+	if code := get(strings.Replace(mediaLink, "/api/media", "/api/download", 1), "").Code; code != http.StatusUnauthorized {
+		t.Fatalf("media signature on /api/download status=%d, want 401", code)
+	}
+	if code := get("/api/download?pk=1", "").Code; code != http.StatusUnauthorized {
+		t.Fatalf("unsigned download status=%d, want 401", code)
+	}
+	if code := get("/api/download?pk=1", testToken).Code; code != http.StatusOK {
+		t.Fatalf("bearer download status=%d, want 200", code)
+	}
+	// Outside the media roots, without media, or unknown: refused.
+	for _, tc := range []struct {
+		query string
+		code  int
+	}{
+		{"pk=5", http.StatusNotFound},
+		{"pk=6", http.StatusNotFound},
+		{"pk=99", http.StatusNotFound},
+		{"pk=abc", http.StatusBadRequest},
+	} {
+		if code := get("/api/download?"+tc.query, testToken).Code; code != tc.code {
+			t.Fatalf("download %s status=%d want %d", tc.query, code, tc.code)
+		}
+	}
+}
+
+func TestSniffedExtension(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		head []byte
+		kind string
+		want string
+	}{
+		{"pdf", []byte("%PDF-1.7 body"), "", ".pdf"},
+		{"opus voice note", realHeaders["opus"], "audio", ".ogg"},
+		{"m4a voice note", realHeaders["m4a"], "audio", ".m4a"},
+		{"mp3 audio", realHeaders["mp3"], "audio", ".mp3"},
+		{"mp4 video", mp4Header, "video", ".mp4"},
+		{"mp4 container, unknown kind", mp4Header, "", ""},
+		{"zip-based document", []byte("PK\x03\x04 docx"), "", ""},
+	} {
+		if got := sniffedExtension(tc.head, tc.kind); got != tc.want {
+			t.Errorf("%s: sniffedExtension = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestDownloadFilename(t *testing.T) {
+	hash := strings.Repeat("b", 43) + "="
+	for _, tc := range []struct{ title, path, want string }{
+		{"Tax return.pdf", "/m/x.pdf", "Tax return.pdf"},
+		{"Tax return", "/m/x.PDF", "Tax return.pdf"},
+		{"Report v1.2 final", "/m/x.pdf", "Report v1.2 final.pdf"},
+		{hash, "/m/3f1c.docx", "3f1c.docx"},
+		{"", "/m/voice.amr", "voice.amr"},
+		{"../../etc/passwd", "/m/x.txt", ".._.._etc_passwd.txt"},
+		{"a\x00b\nc.pdf", "/m/x.pdf", "a_b_c.pdf"},
+		{"Résumé – final.pdf", "/m/x.pdf", "Résumé – final.pdf"},
+		{"...", "/m/x.pdf", "attachment.pdf"},
+		{strings.Repeat("n", 300) + ".pdf", "/m/x.pdf", strings.Repeat("n", 176) + ".pdf"},
+	} {
+		if got := downloadFilename(tc.title, tc.path); got != tc.want {
+			t.Errorf("downloadFilename(%q, %q) = %q, want %q", tc.title, tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -385,29 +569,36 @@ func TestInlineContentType(t *testing.T) {
 		name  string
 		sniff []byte
 		want  string
+		kind  string
 	}{
-		{"clip.mp4", mp4Header, "video/mp4"},
+		{"clip.mp4", mp4Header, "video/mp4", ""},
 		// QuickTime and 3GP are ISO-BMFF like mp4, but neither declares an mp4
 		// brand, so the sniffer gives up and the extension decides.
-		{"clip.mov", realHeaders["mov"], "video/quicktime"},
-		{"clip.3gp", realHeaders["3gp"], "video/3gpp"},
+		{"clip.mov", realHeaders["mov"], "video/quicktime", ""},
+		{"clip.3gp", realHeaders["3gp"], "video/3gpp", ""},
 		// CAF has no signature Go knows at all.
-		{"voice.caf", realHeaders["caf"], "audio/x-caf"},
+		{"voice.caf", realHeaders["caf"], "audio/x-caf", ""},
 		// Ogg is recognised, but only as a container; it names no audio type.
-		{"voice.opus", realHeaders["opus"], "audio/ogg"},
-		// Shared container: the sniffer says video/mp4, but this plays as audio.
-		{"voice.m4a", realHeaders["m4a"], "audio/mp4"},
+		{"voice.opus", realHeaders["opus"], "audio/ogg", ""},
+		// The sniffer cannot place an M4A brand, so the extension decides.
+		{"voice.m4a", realHeaders["m4a"], "audio/mp4", ""},
 		// Sniffed and claimed agree here; either answer would do.
-		{"voice.mp3", realHeaders["mp3"], "audio/mpeg"},
-		{"clip.webm", realHeaders["webm"], "video/webm"},
+		{"voice.mp3", realHeaders["mp3"], "audio/mpeg", ""},
+		{"clip.webm", realHeaders["webm"], "video/webm", ""},
 		// No extension to go on, so the sniffed type stands.
-		{"photo", []byte("GIF89a...."), "image/gif"},
+		{"photo", []byte("GIF89a...."), "image/gif", ""},
 		// Bytes veto a lying extension.
-		{"trap.mp4", html, ""},
-		{"notes.txt", []byte("plain text, definitely not an image"), ""},
-		{"unknown.bin", []byte{0x00, 0x01, 0x02, 0x03}, ""},
+		{"trap.mp4", html, "", ""},
+		{"notes.txt", []byte("plain text, definitely not an image"), "", ""},
+		{"unknown.bin", []byte{0x00, 0x01, 0x02, 0x03}, "", ""},
+		// --copy-media stores files under their hash, with no extension: the
+		// message's kind makes Ogg or mp4 audio.
+		{"3f1ca9e2", realHeaders["opus"], "audio/ogg", "audio"},
+		{"3f1ca9e2", realHeaders["m4a"], "audio/mp4", "audio"},
+		{"3f1ca9e2", realHeaders["opus"], "", ""},
+		{"3f1ca9e2", mp4Header, "video/mp4", "video"},
 	} {
-		got, ok := inlineContentType(tc.name, tc.sniff)
+		got, ok := inlineContentType(tc.name, tc.sniff, tc.kind)
 		if !ok {
 			got = ""
 		}

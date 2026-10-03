@@ -70,6 +70,7 @@
     chart: "M5 9.2h3V19H5V9.2ZM10.6 5h2.8v14h-2.8V5Zm5.6 8H19v6h-2.8v-6Z",
     contact: "M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4Zm0 2c-3.3 0-8 1.7-8 5v2h16v-2c0-3.3-4.7-5-8-5Z",
     document: "M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-5-5Zm-1 6V3.8L17.2 8H13Zm-4 4h6v1.6H9V12Zm0 3.4h6V17H9v-1.6Z",
+    download: "M19 9h-4V3H9v6H5l7 7 7-7ZM5 18v2h14v-2H5Z",
     empty: "M12 3C6.9 3 3 6.6 3 11c0 1.9.7 3.7 1.9 5.1L4 20.5l4.7-1.6c1 .3 2.1.5 3.3.5 5.1 0 9-3.6 9-8.4S17.1 3 12 3Z",
     gif: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Zm4.2 5.4H6.4v3.2h.9v-1h.9v2H6a1 1 0 0 1-1-1v-3.2a1 1 0 0 1 1-1h2.2v1Zm2.7-1v5.2h-1.5V9.4h1.5Zm1.4 0H16v1h-2.2v1.1H16v1h-2.2v2.1h-1.5V9.4Z",
     image: "M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm-9.5 5A1.5 1.5 0 1 1 8 9.5 1.5 1.5 0 0 1 9.5 8Zm9.5 11H5l4.5-6 2.8 3.4L15.5 12 19 19Z",
@@ -698,7 +699,12 @@
       headers: { Authorization: `Bearer ${token}` },
       cache: "no-store",
     });
-    if (!response.ok) throw new Error("no inline preview");
+    if (!response.ok) {
+      const error = new Error("no inline preview");
+      // 404: no readable file. 413/415: it exists but can't be previewed.
+      error.status = response.status;
+      throw error;
+    }
     const blob = await response.blob();
     url = URL.createObjectURL(blob);
     mediaBlobCache.set(sourcePK, url);
@@ -748,7 +754,7 @@
     try {
       const url = await mediaObjectURL(sourcePK);
       const img = document.createElement("img");
-      img.alt = mediaTitleOf(message) || MEDIA_PLACEHOLDER[mediaKind(message)] || "Attachment";
+      img.alt = attachmentLabel(message);
       img.decoding = "async";
       img.addEventListener("load", () => figure.classList.remove("loading"), { once: true });
       // A 200 can still fail to decode (HEIC outside Safari, a truncated file).
@@ -756,9 +762,10 @@
       img.src = url;
       figure.append(img);
       figure.addEventListener("click", () => showLightbox(url, img.alt));
-    } catch {
+    } catch (error) {
       // No local file, non-image bytes, or too large — show the metadata card.
-      figure.replaceWith(mediaCard(message));
+      // Only a 404 means there is nothing to download either.
+      figure.replaceWith(mediaCard(message, { unavailable: error?.status === 404 }));
     }
   }
 
@@ -795,9 +802,11 @@
     player.preload = "none";
     player.playsInline = true;
     player.src = message.media_src;
-    player.setAttribute("aria-label", mediaTitleOf(message) || MEDIA_PLACEHOLDER[kind] || "Attachment");
+    player.setAttribute("aria-label", attachmentLabel(message));
     // Missing, unreadable, or undecodable here.
-    player.addEventListener("error", () => player.replaceWith(mediaCard(message)), { once: true });
+    player.addEventListener("error", async () => {
+      player.replaceWith(mediaCard(message, { unavailable: !(await mediaAvailable(message)) }));
+    }, { once: true });
     return player;
   }
 
@@ -810,19 +819,49 @@
     return Boolean(message.media_type || message.media_title || (message.message_type && message.message_type !== "text"));
   }
 
+  // media_title is the caption for photos, videos, GIFs, stickers, and voice
+  // notes, and a real title for documents, links, and contacts.
+  const CAPTIONED_KINDS = new Set(["image", "video", "gif", "sticker", "audio"]);
+
+  function attachmentLabel(message) {
+    return captionOf(message) || mediaTitleOf(message) || MEDIA_PLACEHOLDER[mediaKind(message)] || "Attachment";
+  }
+
   function mediaTitleOf(message) {
+    if (CAPTIONED_KINDS.has(mediaKind(message))) return "";
     const title = message.media_title || "";
     return MEDIA_HASH_RE.test(title) ? "" : title;
   }
 
   function captionOf(message) {
     const text = message.text || "";
-    if (hasMedia(message) && text && (text === message.media_title || MEDIA_HASH_RE.test(text))) return "";
+    if (!text || (hasMedia(message) && MEDIA_HASH_RE.test(text))) return "";
+    if (hasMedia(message) && !CAPTIONED_KINDS.has(mediaKind(message)) && text === message.media_title) return "";
     return text;
   }
 
-  function mediaCard(message) {
+  // Kinds that are files, unlike link previews, locations, and contacts.
+  const FILE_KINDS = new Set(["image", "video", "gif", "sticker", "audio", "document"]);
+
+  // A player error doesn't say whether the file is missing or unplayable; one
+  // byte through the API tells them apart.
+  async function mediaAvailable(message) {
+    if (!message.source_pk) return false;
+    try {
+      const response = await window.fetch(`/api/media?pk=${message.source_pk}`, {
+        headers: { Authorization: `Bearer ${token}`, Range: "bytes=0-0" },
+        cache: "no-store",
+      });
+      return response.status !== 404;
+    } catch {
+      return true; // Unknown: keep offering the download.
+    }
+  }
+
+  // options.unavailable: the server has no readable file.
+  function mediaCard(message, options = {}) {
     const kind = mediaKind(message);
+    const downloadable = Boolean(message.media_download) && !options.unavailable;
     const card = document.createElement("span");
     card.className = "media-card";
     const badge = document.createElement("span");
@@ -833,10 +872,13 @@
     const title = document.createElement("span");
     title.className = "media-title";
     const realTitle = mediaTitleOf(message);
-    title.textContent = realTitle || MEDIA_PLACEHOLDER[kind] || "Attachment";
+    const typeLabel = (kind === "document" && message.media_format) || MEDIA_PLACEHOLDER[kind] || kind;
+    title.textContent = realTitle || typeLabel || "Attachment";
     copy.append(title);
-    const noteParts = realTitle ? [MEDIA_PLACEHOLDER[kind] || kind] : [];
+    const noteParts = realTitle ? [typeLabel] : [];
     noteParts.push(formatSize(message.media_size));
+    // No download link: WhatsApp never downloaded the file.
+    if (!downloadable && FILE_KINDS.has(kind)) noteParts.push("not downloaded");
     const noteText = noteParts.filter(Boolean).join(" · ");
     if (noteText && noteText !== title.textContent) {
       const note = document.createElement("span");
@@ -845,6 +887,17 @@
       copy.append(note);
     }
     card.append(badge, copy);
+    // A plain link; the server sends it as an attachment (serveDownload).
+    if (downloadable) {
+      const download = document.createElement("a");
+      download.className = "media-download";
+      download.href = message.media_download;
+      download.download = "";
+      download.title = `Download ${title.textContent}`;
+      download.setAttribute("aria-label", download.title);
+      download.append(icon("download"));
+      card.append(download);
+    }
     return card;
   }
 
